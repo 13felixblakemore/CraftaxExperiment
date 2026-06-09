@@ -416,8 +416,8 @@ elif env_name == "craft":
     env_params = env.default_params
     shape = (8268,)
 
-actors = 16
-num_steps = 64
+actors = 64
+num_steps = 128
 num_minibatches = 8
 update_epochs = 4
 total_timesteps = 500_000
