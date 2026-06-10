@@ -8,10 +8,12 @@ import jax
 import numpy as np
 import optax
 import jax.numpy as jnp
+import wandb
 from craftax.craftax.renderer import render_craftax_pixels
 from craftax.craftax_env import make_craftax_env_from_name
 from flax import linen as nn
 
+import configs
 from test_environment import ChainEnv
 
 
@@ -61,11 +63,8 @@ class Critic(nn.Module):
 
 
 class PPO:
-    def __init__(self, env, env_params, optimiser, gamma=0.99, lmbda=0.95, epsilon=0.2, obs_shape=(8268,)):
+    def __init__(self, env, env_params, optimiser, obs_shape=(8268,)):
         self.step = 0
-        self.gamma = gamma
-        self.lmbda = lmbda
-        self.epsilon = epsilon
         self.actor = Actor()
         self.critic = Critic()
 
@@ -133,8 +132,11 @@ def make_training_step(agent, env, optimiser):
             advantage_batch,
             env_params,
             old_log_probs,
+            epsilon,
+            ent_coef,
+            vf_coef,
     ):
-        def loss_fn(params, state_batch, action_batch, returns_batch, advantage_batch, env_params, old_log_probs):
+        def loss_fn(params, state_batch, action_batch, returns_batch, advantage_batch, env_params, old_log_probs, epsilon, ent_coef, vf_coef):
             logits = agent.actor.apply(params["actor"], state_batch, env, env_params)
             log_probs_all = jax.nn.log_softmax(logits, axis=-1)
 
@@ -152,7 +154,7 @@ def make_training_step(agent, env, optimiser):
             old_approx_kl = -jnp.mean(log_ratio)
 
             clipfrac = jnp.mean(
-                (jnp.abs(ratio - 1.0) > agent.epsilon).astype(jnp.float32)
+                (jnp.abs(ratio - 1.0) > epsilon).astype(jnp.float32)
             )
 
             entropy = -jnp.mean(
@@ -165,7 +167,7 @@ def make_training_step(agent, env, optimiser):
             basic_loss = ratio * advantage_batch
 
             clipped_loss = (
-                    jnp.clip(ratio, 1 - agent.epsilon, 1 + agent.epsilon)
+                    jnp.clip(ratio, 1 - epsilon, 1 + epsilon)
                     * advantage_batch
             )
 
@@ -173,9 +175,6 @@ def make_training_step(agent, env, optimiser):
 
             new_values = agent.get_state_value(params["critic"], state_batch)
             critic_loss = jnp.mean((new_values - returns_batch) ** 2)
-
-            vf_coef = 0.5
-            ent_coef = 0.01
 
             loss = actor_loss + vf_coef * critic_loss - ent_coef * entropy
             return loss, {
@@ -188,14 +187,21 @@ def make_training_step(agent, env, optimiser):
                         }
 
         (loss, info), grad = jax.value_and_grad(loss_fn, has_aux=True)(
-            params, state_batch, action_batch, returns_batch, advantage_batch, env_params, old_log_probs
+            params, state_batch, action_batch, returns_batch, advantage_batch, env_params, old_log_probs, epsilon, ent_coef, vf_coef,
         )
         updates, new_opt_state = optimiser.update(grad, opt_state, params)
         new_params = optax.apply_updates(params, updates)
-        return new_params, new_opt_state, loss
+        return new_params, new_opt_state, loss, info
     return train_step
 
-def train(env, env_params, agent, schedule, optimiser, num_steps=5, total_timesteps=100, actors=2, num_minibatches=2, update_epochs=2, obs_shape=(8268,)):
+def train(env, env_params, agent, obs_shape=(8268,)):
+    config = wandb.config
+    num_steps = config["num_steps"]
+    actors = config["actors"]
+    num_minibatches = config["num_minibatches"]
+    total_timesteps = config["total_timesteps"]
+    update_epochs = config["update_epochs"]
+
     total_steps = 0
     batch_size = num_steps * actors # n parallel envs, with m step rollout each
     minibatch_size = batch_size // num_minibatches # split total rollout into minibatches
@@ -248,9 +254,15 @@ def train(env, env_params, agent, schedule, optimiser, num_steps=5, total_timest
             obs = next_obs
             env_states = next_env_states
 
+        rollout_mean_reward = jnp.mean(reward_seq)
+        rollout_sum_reward = jnp.sum(reward_seq)
+        rollout_mean_done = jnp.mean(done_seq)
+
         next_values = agent.get_state_value(agent.params["critic"], next_obs)
         advantages = jnp.zeros_like(reward_seq)
         last_lmbda = 0
+        lmbda = wandb.config["lambda"]
+        gamma = wandb.config["gamma"]
         for t in reversed(range(num_steps)):
             if t == num_steps - 1:
                 next_non_terminal = 1.0 - dones
@@ -259,10 +271,20 @@ def train(env, env_params, agent, schedule, optimiser, num_steps=5, total_timest
                 next_non_terminal = 1.0 - done_seq[t + 1]
                 next_values = value_seq[t + 1]
             next_values = next_values.squeeze()
-            deltas = reward_seq[t] + agent.gamma * next_values * next_non_terminal - value_seq[t]
-            last_lmbda = deltas + agent.gamma * agent.lmbda * next_non_terminal * last_lmbda
+            deltas = reward_seq[t] + gamma * next_values * next_non_terminal - value_seq[t]
+            last_lmbda = deltas + gamma * lmbda * next_non_terminal * last_lmbda
             advantages = advantages.at[t].set(last_lmbda)
         returns = advantages + value_seq
+
+        value_seq_flat_for_ev = value_seq.reshape(-1)
+        returns_flat_for_ev = returns.reshape(-1)
+
+        returns_var = jnp.var(returns_flat_for_ev)
+        explained_var = jnp.where(
+            returns_var == 0.0,
+            0.0,
+            1.0 - jnp.var(returns_flat_for_ev - value_seq_flat_for_ev) / returns_var
+        )
 
         key, key_act = jax.random.split(key, 2)
         keys_act = jax.random.split(key_act, minibatch_size)
@@ -289,9 +311,38 @@ def train(env, env_params, agent, schedule, optimiser, num_steps=5, total_timest
                 returns_batch = returns_flat[mb_idx]
                 advantage_batch = advantages_flat[mb_idx]
 
-                new_params, new_opt_state, loss = agent.train_step(agent.params, agent.opt_state, state_batch, action_batch, returns_batch, advantage_batch, env_params, old_log_probs)
+                ent_coef = config["ent_coef"]
+                vf_coef = config["vf_coef"]
+                epsilon = config["epsilon"]
+
+                new_params, new_opt_state, loss, info = agent.train_step(agent.params, agent.opt_state, state_batch, action_batch, returns_batch, advantage_batch, env_params, old_log_probs, epsilon, ent_coef, vf_coef)
                 agent.params = new_params
                 agent.opt_state = new_opt_state
+
+                wandb.log({
+                    "loss/total": loss,
+                    "loss/actor": info["actor_loss"],
+                    "loss/critic": info["critic_loss"],
+                    "policy/entropy": info["entropy"],
+                    "policy/clipfrac": info["clipfrac"],
+                    "policy/approx_kl": info["approx_kl"],
+                    "charts/total_steps": total_steps,
+                })
+
+        log_data = {
+            "charts/total_steps": total_steps,
+            "charts/iteration": iteration,
+
+            "rollout/mean_reward": float(jax.device_get(rollout_mean_reward)),
+            "rollout/sum_reward": float(jax.device_get(rollout_sum_reward)),
+            "rollout/mean_done": float(jax.device_get(rollout_mean_done)),
+            "value/explained_variance": float(jax.device_get(explained_var)),
+            "value/mean_return": float(jax.device_get(jnp.mean(returns))),
+            "value/mean_value": float(jax.device_get(jnp.mean(value_seq))),
+            "value/mean_advantage": float(jax.device_get(jnp.mean(advantages))),
+        }
+
+        wandb.log(log_data, step=total_steps)
 
 
 def test(
@@ -302,6 +353,7 @@ def test(
     actors=2,
     max_episode_steps=500,
     deterministic=False,
+    record_vid=False,
 ):
     key = jax.random.PRNGKey(1)
 
@@ -323,9 +375,10 @@ def test(
 
         obs, env_states = batched_reset(reset_keys, env_params)
 
-        frame = render_craftax_pixels(get_first_env_state(env_states), 64)
-        frame = frame.astype(jnp.uint8)
-        frames.append(np.asarray(jax.device_get(frame)))
+        if record_vid:
+            frame = render_craftax_pixels(get_first_env_state(env_states), 64)
+            frame = frame.astype(jnp.uint8)
+            frames.append(np.asarray(jax.device_get(frame)))
 
         done_mask = jnp.zeros((actors,), dtype=bool)
 
@@ -383,14 +436,16 @@ def test(
                 next_env_states,
             )
 
-            frame = render_craftax_pixels(get_first_env_state(env_states), 64)
-            frame = frame.astype(jnp.uint8)
-            frames.append(np.asarray(jax.device_get(frame)))
+            if record_vid:
+                frame = render_craftax_pixels(get_first_env_state(env_states), 64)
+                frame = frame.astype(jnp.uint8)
+                frames.append(np.asarray(jax.device_get(frame)))
 
             done_mask = new_done_mask
             t += 1
 
-        imageio.mimsave("episode_ppo.gif", frames, fps=5)
+        if record_vid:
+            imageio.mimsave("episode_ppo.gif", frames, fps=5)
 
         all_episode_steps.extend(list(jax.device_get(episode_steps)))
         all_episode_returns.extend(list(jax.device_get(episode_returns)))
@@ -405,49 +460,42 @@ def test(
 
     return all_episode_steps, all_episode_returns
 
-env_name = "craft"
-if env_name == "chain":
-    length = 10
-    env = ChainEnv(length=length, max_steps=1000)
-    env_params = env.default_params
-    shape = length
-elif env_name == "craft":
+
+if __name__ == "__main__":
     env = make_craftax_env_from_name("Craftax-Symbolic-v1", auto_reset=True)
     env_params = env.default_params
     shape = (8268,)
 
-actors = 64
-num_steps = 128
-num_minibatches = 8
-update_epochs = 4
-total_timesteps = 500_000
+    wandb.init(
+        project="craftax",
+        name="ppo-1",
+        config=configs.debug_config
+    )
 
-lr = 2.5e-4
-gamma = 0.99
-lmbda = 0.8
-epsilon = 0.2
-ent_coef = 0.01
-vf_coef = 0.5
-max_grad_norm = 0.5
-batch_size = actors * num_steps
-num_updates = total_timesteps // batch_size
-num_optim_steps = num_updates * update_epochs * num_minibatches
+    config = wandb.config
 
-schedule = optax.linear_schedule(
-    init_value=2.5e-4,
-    end_value=0.0,
-    transition_steps=num_optim_steps,
-)
+    batch_size = config["actors"] * config["num_steps"]
+    num_updates = config["total_timesteps"] // batch_size
+    num_optim_steps = num_updates * config["update_epochs"] * config["num_minibatches"]
 
-optimiser = optax.chain(
-    optax.clip_by_global_norm(0.5),
-    optax.adam(schedule, eps=1e-5),
-)
-agent = PPO(env, env_params, optimiser, obs_shape=shape)
+    schedule = optax.linear_schedule(
+        init_value=config["learning_rate"],
+        end_value=config["end_learning_rate"],
+        transition_steps=num_optim_steps
+    )
 
-ft = time.perf_counter()
-train(env, env_params, agent, schedule, optimiser, update_epochs=update_epochs, actors=actors, total_timesteps=total_timesteps, num_steps=num_steps, num_minibatches=num_minibatches, obs_shape=shape)
-nt = time.perf_counter()
-latency= nt - ft
-print("Latency: ", latency)
-test(agent, env, env_params, actors=1, num_episodes=1, deterministic=False)
+    optimiser = optax.chain(
+        optax.clip_by_global_norm(config["max_grad_norm"]),
+        optax.adam(schedule, eps=config["adam_epsilon"]),
+    )
+
+    agent = PPO(env, env_params, optimiser, obs_shape=shape)
+
+    ft = time.perf_counter()
+    train(env, env_params, agent, obs_shape=shape)
+    nt = time.perf_counter()
+    latency= nt - ft
+    print("Training time: ", latency)
+    test(agent, env, env_params, actors=1, num_episodes=1, deterministic=False)
+
+    # test is very inefficient. fix
