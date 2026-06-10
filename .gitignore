@@ -1,0 +1,6 @@
+# created by virtualenv automatically
+.venv/
+wandb/
+episode_ppo.gif
+episode.gif
+anim.gif
