@@ -453,6 +453,11 @@ def test(
     all_episode_steps = all_episode_steps[:num_episodes]
     all_episode_returns = all_episode_returns[:num_episodes]
 
+    wandb.log({
+        "eval/episode_steps": all_episode_steps,
+        "eval/episode_returns": all_episode_returns,
+        "eval/mean_episode_return": np.mean(all_episode_returns),
+    })
     print("Episode steps:", all_episode_steps)
     print("Episode returns:", all_episode_returns)
     print("Mean steps:", np.mean(all_episode_steps))
