@@ -218,6 +218,89 @@ def make_training_step(agent, env, optimiser):
     return train_step
 
 
+
+def make_update_rollout_jit(
+        agent,
+        batch_size,
+        minibatch_size,
+        num_minibatches,
+        update_epochs,
+):
+    @jax.jit
+    def update_rollout(
+            params,
+            opt_state,
+            flat_batch,
+            key,
+            env_params,
+            epsilon,
+            ent_coef,
+            vf_coef,
+    ):
+        def update_epoch(carry, _):
+            params, opt_state, key = carry
+            key, perm_key = jax.random.split(key)
+
+            permutation = jax.random.permutation(
+                perm_key,
+                jnp.arange(batch_size),
+            )
+
+            minibatch_indices = permutation.reshape(
+                (num_minibatches, minibatch_size)
+            )
+
+            def update_minibatch(carry, mb_idx):
+                params, opt_state = carry
+
+                state_batch = flat_batch["states"][mb_idx]
+                action_batch = flat_batch["actions"][mb_idx]
+                returns_batch = flat_batch["returns"][mb_idx]
+                advantage_batch = flat_batch["advantages"][mb_idx]
+                old_log_probs = flat_batch["log_probs"][mb_idx]
+
+                new_params, new_opt_state, loss, info = agent.train_step(
+                    params, opt_state, state_batch,
+                    action_batch, returns_batch, advantage_batch,
+                    env_params, old_log_probs, epsilon, ent_coef,
+                    vf_coef)
+
+                new_carry = (new_params, new_opt_state)
+
+                metrics = {
+                    "loss_total": loss,
+                    "loss_actor": info["actor_loss"],
+                    "loss_critic": info["critic_loss"],
+                    "entropy": info["entropy"],
+                    "approx_kl": info["approx_kl"],
+                    "clipfrac": info["clipfrac"],
+                }
+
+                return new_carry, metrics
+
+            (params, opt_state), minibatch_metrics = jax.lax.scan(
+                update_minibatch,
+                (params, opt_state),
+                minibatch_indices,
+            )
+
+            return (params, opt_state, key), minibatch_metrics
+
+        (params, opt_state, key), epoch_metrics = jax.lax.scan(
+            update_epoch,
+        (params, opt_state, key),
+            xs=None,
+            length=update_epochs,
+        )
+
+        mean_metrics = jax.tree_util.tree_map(
+            lambda x: jnp.mean(x),
+            epoch_metrics,
+        )
+
+        return params, opt_state, key, mean_metrics
+    return update_rollout
+
 def train(env, env_params, agent, obs_shape=(8268,)):
     config = wandb.config
     num_steps = config["num_steps"]
@@ -353,26 +436,35 @@ def train(env, env_params, agent, obs_shape=(8268,)):
         advantages_flat = advantages.reshape(-1)
         returns_flat = returns.reshape(-1)
 
-        for epoch in range(update_epochs):
-            key, key_idx = jax.random.split(key)
-            b_idx = jax.random.permutation(key_idx, jnp.arange(batch_size))
-            for start in range(0, batch_size, minibatch_size):
-                end = start + minibatch_size
-                mb_idx = b_idx[start:end]
+        ent_coef = config["ent_coef"]
+        vf_coef = config["vf_coef"]
+        epsilon = config["epsilon"]
 
-                old_log_probs = log_prob_seq_flat[mb_idx]
-                state_batch = state_seq_flat[mb_idx]
-                action_batch = action_seq_flat[mb_idx]
-                returns_batch = returns_flat[mb_idx]
-                advantage_batch = advantages_flat[mb_idx]
+        update_rollout = make_update_rollout_jit(
+            agent,
+            batch_size=batch_size,
+            minibatch_size=minibatch_size,
+            num_minibatches=num_minibatches,
+            update_epochs=update_epochs,
+        )
 
-                ent_coef = config["ent_coef"]
-                vf_coef = config["vf_coef"]
-                epsilon = config["epsilon"]
+        flat_batch = {
+            "states": state_seq_flat,
+            "actions": action_seq_flat,
+            "returns": returns_flat,
+            "advantages": advantages_flat,
+            "log_probs": log_prob_seq_flat,
+        }
 
-                new_params, new_opt_state, loss, info = agent.train_step(agent.params, agent.opt_state, state_batch, action_batch, returns_batch, advantage_batch, env_params, old_log_probs, epsilon, ent_coef, vf_coef)
-                agent.params = new_params
-                agent.opt_state = new_opt_state
+        params, opt_state, key, mean_metrics = update_rollout(
+            agent.params,
+            agent.opt_state,
+            flat_batch,
+            key,
+            env_params,
+            epsilon,
+            ent_coef,
+            vf_coef,)
 
         log_data = {
             "charts/total_steps": total_steps,
@@ -663,7 +755,7 @@ if __name__ == "__main__":
     wandb.init(
         project="craftax",
         name="ppo-1",
-        config=configs.large_run
+        config=configs.debug_config
     )
 
     config = wandb.config
@@ -690,6 +782,6 @@ if __name__ == "__main__":
     nt = time.perf_counter()
     latency= nt - ft
     print("Training time: ", latency)
-    test(agent, env, env_params, actors=32, num_episodes=32, deterministic=False, record_vid=True)
+    test(agent, env, env_params, actors=1, num_episodes=1, deterministic=False, record_vid=True)
 
     # test is very inefficient. fix
