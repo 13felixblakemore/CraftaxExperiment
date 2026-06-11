@@ -755,7 +755,7 @@ if __name__ == "__main__":
     wandb.init(
         project="craftax",
         name="ppo-1",
-        config=configs.debug_config
+        config=configs.large_run
     )
 
     config = wandb.config
@@ -782,6 +782,6 @@ if __name__ == "__main__":
     nt = time.perf_counter()
     latency= nt - ft
     print("Training time: ", latency)
-    test(agent, env, env_params, actors=1, num_episodes=1, deterministic=False, record_vid=True)
+    test(agent, env, env_params, actors=16, num_episodes=16, deterministic=False, record_vid=True)
 
     # test is very inefficient. fix
