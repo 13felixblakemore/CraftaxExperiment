@@ -673,7 +673,7 @@ if __name__ == "__main__":
     wandb.init(
         project="craftax",
         name="ppo-1",
-        config=configs.debug_config
+        config=configs.large_run
     )
 
     config = wandb.config
