@@ -448,7 +448,7 @@ if __name__ == "__main__":
     wandb.init(
         project="craftax",
         name="ppo-1",
-        config=configs.debug_config
+        config=configs.large_run
     )
 
     config = wandb.config
@@ -490,11 +490,11 @@ if __name__ == "__main__":
 
     train_iteration = make_train_iteration(env, env_params, agent, config, obs_shape=shape)
 
-    train_iterations = 10
+    train_iterations = 100
     for iteration in range(train_iterations):
         run_state, metrics = train_iteration(run_state)
 
-        if iteration % 1 == 0:
+        if iteration % 10 == 0:
             metrics = jax.device_get(metrics)
             wandb.log(
                 {k: float(v) for k, v in metrics.items()},
