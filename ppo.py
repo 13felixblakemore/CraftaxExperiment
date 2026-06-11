@@ -374,16 +374,6 @@ def train(env, env_params, agent, obs_shape=(8268,)):
                 agent.params = new_params
                 agent.opt_state = new_opt_state
 
-                wandb.log({
-                    "loss/total": loss,
-                    "loss/actor": info["actor_loss"],
-                    "loss/critic": info["critic_loss"],
-                    "policy/entropy": info["entropy"],
-                    "policy/clipfrac": info["clipfrac"],
-                    "policy/approx_kl": info["approx_kl"],
-                    "charts/total_steps": total_steps,
-                })
-
         log_data = {
             "charts/total_steps": total_steps,
             "charts/iteration": iteration,
