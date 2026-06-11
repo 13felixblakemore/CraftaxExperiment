@@ -368,6 +368,14 @@ def train(env, env_params, agent, obs_shape=(8268,)):
         next_obs, next_env_states, key = carry
         return next_obs, next_env_states, key, rollout
 
+    update_rollout = make_update_rollout_jit(
+        agent,
+        batch_size=batch_size,
+        minibatch_size=minibatch_size,
+        num_minibatches=num_minibatches,
+        update_epochs=update_epochs,
+    )
+
     for iteration in range(num_iterations):
         print(f"Iteration: {iteration}/{num_iterations}")
 
@@ -440,14 +448,6 @@ def train(env, env_params, agent, obs_shape=(8268,)):
         vf_coef = config["vf_coef"]
         epsilon = config["epsilon"]
 
-        update_rollout = make_update_rollout_jit(
-            agent,
-            batch_size=batch_size,
-            minibatch_size=minibatch_size,
-            num_minibatches=num_minibatches,
-            update_epochs=update_epochs,
-        )
-
         flat_batch = {
             "states": state_seq_flat,
             "actions": action_seq_flat,
@@ -465,6 +465,9 @@ def train(env, env_params, agent, obs_shape=(8268,)):
             epsilon,
             ent_coef,
             vf_coef,)
+
+        agent.params = params
+        agent.opt_state = opt_state
 
         log_data = {
             "charts/total_steps": total_steps,
