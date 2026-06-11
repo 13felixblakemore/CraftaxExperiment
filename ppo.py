@@ -217,7 +217,36 @@ def make_training_step(agent, env, optimiser):
         return new_params, new_opt_state, loss, info
     return train_step
 
+def compute_gae(
+        reward_seq, value_seq, done_seq, next_values, lmbda, gamma
+):
+    @jax.jit
+    def GAE(carry, transition):
+        last_lmbda, next_value = carry
+        reward, value, done = transition
 
+        next_non_terminal = 1.0 - done.astype(jnp.float32)
+
+        delta = reward + gamma * next_value * next_non_terminal - value
+        last_lmbda = delta + gamma * lmbda * next_non_terminal * last_lmbda
+        advantage = last_lmbda
+
+        new_carry = (last_lmbda, value)
+
+        return new_carry, advantage
+
+    initial_carry = (jnp.zeros_like(next_values), next_values)
+
+    _, advantages = jax.lax.scan(
+        GAE,
+        initial_carry,
+        (reward_seq, value_seq, done_seq),
+        reverse=True,
+    )
+
+    returns = advantages + value_seq
+
+    return advantages, returns
 
 def make_update_rollout_jit(
         agent,
@@ -402,25 +431,10 @@ def train(env, env_params, agent, obs_shape=(8268,)):
 
         next_values = agent.get_state_value(agent.params["critic"], obs).reshape(-1)
 
-        advantages = jnp.zeros_like(reward_seq)
-        last_lmbda = jnp.zeros((actors,))
-
         lmbda = config["lambda"]
         gamma = config["gamma"]
 
-        for t in reversed(range(num_steps)):
-            if t == num_steps - 1:
-                next_value = next_values
-            else:
-                next_value = value_seq[t + 1]
-
-            next_non_terminal = 1.0 - done_seq[t]
-
-            delta = reward_seq[t] + gamma * next_value * next_non_terminal - value_seq[t]
-            last_lmbda = delta + gamma * lmbda * next_non_terminal * last_lmbda
-            advantages = advantages.at[t].set(last_lmbda)
-
-        returns = advantages + value_seq
+        advantages, returns = compute_gae(reward_seq, value_seq, done_seq, next_values, lmbda, gamma)
 
         value_seq_flat_for_ev = value_seq.reshape(-1)
         returns_flat_for_ev = returns.reshape(-1)
@@ -497,22 +511,6 @@ def test(
     seed=1,
     wandb_step=None,
 ):
-    """
-    Faster JAX evaluation.
-
-    Same core functionality as your current test:
-    - runs num_episodes evaluation episodes
-    - uses `actors` parallel envs per batch
-    - stops accumulating return/steps after each env is done
-    - returns all_episode_steps, all_episode_returns
-    - logs eval metrics to W&B
-
-    Difference:
-    - uses lax.scan instead of a Python while loop
-    - runs for fixed max_episode_steps, masking finished envs
-    - video recording is kept separate and optional
-    """
-
     batched_reset = jax.vmap(env.reset, in_axes=(0, None))
     batched_step = jax.vmap(env.step, in_axes=(0, 0, 0, None))
 
@@ -696,13 +694,6 @@ def record_eval_video(
     seed=123,
     filename="episode_ppo.gif",
 ):
-    """
-    Records one evaluation episode as a GIF.
-
-    This is intentionally not jitted because rendering and imageio.mimsave
-    are Python/host-side operations.
-    """
-
     key = jax.random.PRNGKey(seed)
 
     obs, env_state = env.reset(key, env_params)
