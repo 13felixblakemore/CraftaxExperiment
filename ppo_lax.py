@@ -466,7 +466,7 @@ def make_train_iteration(env, env_params, agent, config, obs_shape=(8268,)):
         maybe_log(
             metrics,
             total_steps,
-            update_step,
+            update_steps,
             log_every=10,
         )
 
