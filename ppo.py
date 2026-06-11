@@ -700,6 +700,6 @@ if __name__ == "__main__":
     nt = time.perf_counter()
     latency= nt - ft
     print("Training time: ", latency)
-    test(agent, env, env_params, actors=32, num_episodes=32, deterministic=False)
+    test(agent, env, env_params, actors=32, num_episodes=32, deterministic=False, record_vid=True)
 
     # test is very inefficient. fix
