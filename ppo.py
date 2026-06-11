@@ -81,6 +81,7 @@ class PPO:
         self.optimiser = optimiser
         self.opt_state = self.optimiser.init(self.params)
 
+        self.act_logs_values = make_act_logprob_value_jit(self, env)
         self.train_step = make_training_step(self, env, self.optimiser)
         self.get_state_value = make_get_state_value_jit(self)
         self.choose_action = choose_action_jit(self, env)
@@ -102,6 +103,29 @@ def choose_action_jit(agent, env):
         log_probs, _ = get_action_log_probs(actor_params, state_batch, actions, env_params)
         return actions, log_probs
     return choose_action
+
+
+def make_act_logprob_value_jit(agent, env):
+    @jax.jit
+    def act_logprob_value(params, obs, env_params, policy_keys):
+        logits = agent.actor.apply(params["actor"], obs, env, env_params)
+        values = agent.critic.apply(params["critic"], obs).reshape(-1)
+
+        actions = jax.vmap(jax.random.categorical, in_axes=(0, 0))(
+            policy_keys,
+            logits,
+        )
+
+        log_probs_all = jax.nn.log_softmax(logits, axis=-1)
+        log_probs = jnp.take_along_axis(
+            log_probs_all,
+            actions.astype(jnp.int32)[:, None],
+            axis=1,
+        ).reshape(-1)
+
+        return actions, log_probs, values
+
+    return act_logprob_value
 
 
 def get_log_probs_jit(agent, env):
@@ -163,7 +187,6 @@ def make_training_step(agent, env, optimiser):
 
             advantage_batch = (advantage_batch - jnp.mean(advantage_batch)) / (jnp.std(advantage_batch) + 1e-8)
 
-            #jax.debug.print("Ratio: {}", ratio)
             basic_loss = ratio * advantage_batch
 
             clipped_loss = (
@@ -173,7 +196,7 @@ def make_training_step(agent, env, optimiser):
 
             actor_loss = -jnp.mean(jnp.minimum(basic_loss, clipped_loss))
 
-            new_values = agent.get_state_value(params["critic"], state_batch)
+            new_values = agent.get_state_value(params["critic"], state_batch).reshape(-1)
             critic_loss = jnp.mean((new_values - returns_batch) ** 2)
 
             loss = actor_loss + vf_coef * critic_loss - ent_coef * entropy
@@ -193,6 +216,7 @@ def make_training_step(agent, env, optimiser):
         new_params = optax.apply_updates(params, updates)
         return new_params, new_opt_state, loss, info
     return train_step
+
 
 def train(env, env_params, agent, obs_shape=(8268,)):
     config = wandb.config
@@ -215,65 +239,96 @@ def train(env, env_params, agent, obs_shape=(8268,)):
 
     batched_step = jax.vmap(env.step, in_axes=(0, 0, 0, None))
 
-    state_seq = jnp.zeros((num_steps, actors, *obs_shape))
-    action_seq = jnp.zeros((num_steps, actors))
-    reward_seq = jnp.zeros((num_steps, actors))
-    done_seq = jnp.zeros((num_steps, actors))
-    value_seq = jnp.zeros((num_steps, actors))
-    log_prob_seq = jnp.zeros((num_steps, actors))
+    @jax.jit
+    def collect_rollout(params, obs, env_states, key, env_params):
+        def rollout_step(carry, _):
+            obs, env_states, key = carry
+
+            key, key_act, key_step = jax.random.split(key, 3)
+            act_keys = jax.random.split(key_act, actors)
+            step_keys = jax.random.split(key_step, actors)
+
+            actions, log_probs, values = agent.act_logs_values(
+                params,
+                obs,
+                env_params,
+                act_keys,
+            )
+
+            next_obs, next_env_states, rewards, dones, infos = batched_step(
+                step_keys,
+                env_states,
+                actions,
+                env_params,
+            )
+
+            transition = {
+                "states": obs,
+                "actions": actions,
+                "rewards": rewards,
+                "dones": dones,
+                "values": values,
+                "log_probs": log_probs,
+            }
+
+            new_carry = (next_obs, next_env_states, key)
+            return new_carry, transition
+
+        carry = (obs, env_states, key)
+        carry, rollout = jax.lax.scan(
+            rollout_step,
+            carry,
+            xs=None,
+            length=num_steps,
+        )
+
+        next_obs, next_env_states, key = carry
+        return next_obs, next_env_states, key, rollout
 
     for iteration in range(num_iterations):
         print(f"Iteration: {iteration}/{num_iterations}")
-        for step in range(num_steps):
-            key, key_act, key_step = jax.random.split(key, 3)
-            key_step = jax.random.split(key_step, actors)
-            key_act = jax.random.split(key_act, actors)
 
-            values = agent.get_state_value(agent.params["critic"], obs)
-            values = values.squeeze()
+        obs, env_states, key, rollout = collect_rollout(
+            agent.params,
+            obs,
+            env_states,
+            key,
+            env_params,
+        )
 
-            actions, log_probs = agent.choose_action(
-                agent.params["actor"], obs, env_params, key_act
-            )
-            next_obs, next_env_states, rewards, dones, infos = batched_step(
-                key_step, env_states, actions, env_params
-            )
+        total_steps += batch_size
 
-            state_seq = state_seq.at[step].set(obs)
-            action_seq = action_seq.at[step].set(actions)
-            reward_seq = reward_seq.at[step].set(rewards)
-            value_seq = value_seq.at[step].set(values)
-            done_seq = done_seq.at[step].set(dones)
-            log_prob_seq = log_prob_seq.at[step].set(log_probs)
-
-            total_steps += actors
-
-            if total_steps % 100 == 0:
-                print(f"Step {total_steps}")
-
-            obs = next_obs
-            env_states = next_env_states
+        state_seq = rollout["states"]
+        action_seq = rollout["actions"]
+        reward_seq = rollout["rewards"]
+        done_seq = rollout["dones"]
+        value_seq = rollout["values"]
+        log_prob_seq = rollout["log_probs"]
 
         rollout_mean_reward = jnp.mean(reward_seq)
         rollout_sum_reward = jnp.sum(reward_seq)
         rollout_mean_done = jnp.mean(done_seq)
 
-        next_values = agent.get_state_value(agent.params["critic"], next_obs)
+        next_values = agent.get_state_value(agent.params["critic"], obs).reshape(-1)
+
         advantages = jnp.zeros_like(reward_seq)
-        last_lmbda = 0
-        lmbda = wandb.config["lambda"]
-        gamma = wandb.config["gamma"]
+        last_lmbda = jnp.zeros((actors,))
+
+        lmbda = config["lambda"]
+        gamma = config["gamma"]
+
         for t in reversed(range(num_steps)):
             if t == num_steps - 1:
-                next_non_terminal = 1.0 - dones
-                next_values = next_values
+                next_value = next_values
             else:
-                next_non_terminal = 1.0 - done_seq[t + 1]
-                next_values = value_seq[t + 1]
-            next_values = next_values.squeeze()
-            deltas = reward_seq[t] + gamma * next_values * next_non_terminal - value_seq[t]
-            last_lmbda = deltas + gamma * lmbda * next_non_terminal * last_lmbda
+                next_value = value_seq[t + 1]
+
+            next_non_terminal = 1.0 - done_seq[t]
+
+            delta = reward_seq[t] + gamma * next_value * next_non_terminal - value_seq[t]
+            last_lmbda = delta + gamma * lmbda * next_non_terminal * last_lmbda
             advantages = advantages.at[t].set(last_lmbda)
+
         returns = advantages + value_seq
 
         value_seq_flat_for_ev = value_seq.reshape(-1)
@@ -351,62 +406,62 @@ def test(
     env_params,
     num_episodes=10,
     actors=2,
-    max_episode_steps=500,
+    max_episode_steps=10000,
     deterministic=False,
     record_vid=False,
+    seed=1,
+    wandb_step=None,
 ):
-    key = jax.random.PRNGKey(1)
+    """
+    Faster JAX evaluation.
+
+    Same core functionality as your current test:
+    - runs num_episodes evaluation episodes
+    - uses `actors` parallel envs per batch
+    - stops accumulating return/steps after each env is done
+    - returns all_episode_steps, all_episode_returns
+    - logs eval metrics to W&B
+
+    Difference:
+    - uses lax.scan instead of a Python while loop
+    - runs for fixed max_episode_steps, masking finished envs
+    - video recording is kept separate and optional
+    """
 
     batched_reset = jax.vmap(env.reset, in_axes=(0, None))
     batched_step = jax.vmap(env.step, in_axes=(0, 0, 0, None))
 
-    all_episode_steps = []
-    all_episode_returns = []
-    frames = []
-
-    num_batches = int(np.ceil(num_episodes / actors))
-
-    for batch in range(num_batches):
+    @jax.jit
+    def eval_batch(params, key):
         key, key_reset = jax.random.split(key)
         reset_keys = jax.random.split(key_reset, actors)
 
-        def get_first_env_state(env_states):
-            return jax.tree_util.tree_map(lambda x: x[0], env_states)
-
         obs, env_states = batched_reset(reset_keys, env_params)
 
-        if record_vid:
-            frame = render_craftax_pixels(get_first_env_state(env_states), 64)
-            frame = frame.astype(jnp.uint8)
-            frames.append(np.asarray(jax.device_get(frame)))
-
         done_mask = jnp.zeros((actors,), dtype=bool)
+        episode_steps = jnp.zeros((actors,), dtype=jnp.int32)
+        episode_returns = jnp.zeros((actors,), dtype=jnp.float32)
 
-        t = 0
+        def scan_step(carry, _):
+            obs, env_states, done_mask, episode_steps, episode_returns, key = carry
 
-        episode_steps = jnp.zeros((actors,), dtype=int)
-        episode_returns = jnp.zeros((actors,), dtype=float)
-
-        while (not bool(jax.device_get(jnp.all(done_mask)))) and t < max_episode_steps:
             key, key_act, key_step = jax.random.split(key, 3)
-
-            step_keys = jax.random.split(key_step, actors)
             act_keys = jax.random.split(key_act, actors)
+            step_keys = jax.random.split(key_step, actors)
+
+            logits = agent.actor.apply(
+                params["actor"],
+                obs,
+                env,
+                env_params,
+            )
 
             if deterministic:
-                logits = agent.actor.apply(
-                    agent.params["actor"],
-                    obs,
-                    env,
-                    env_params,
-                )
                 actions = jnp.argmax(logits, axis=-1)
             else:
-                actions, _ = agent.choose_action(
-                    agent.params["actor"],
-                    obs,
-                    env_params,
+                actions = jax.vmap(jax.random.categorical, in_axes=(0, 0))(
                     act_keys,
+                    logits,
                 )
 
             next_obs, next_env_states, rewards, dones, infos = batched_step(
@@ -423,11 +478,12 @@ def test(
 
             new_done_mask = done_mask | dones
 
-            obs_mask = active.reshape((active.shape[0],) + (1,) * (obs.ndim - 1))
+            # Freeze finished envs so they do not keep changing after first done.
+            obs_mask = active.reshape((actors,) + (1,) * (obs.ndim - 1))
             obs = jnp.where(obs_mask, next_obs, obs)
 
             def mask_done(old, new):
-                mask = active.reshape((active.shape[0],) + (1,) * (old.ndim - 1))
+                mask = active.reshape((actors,) + (1,) * (old.ndim - 1))
                 return jnp.where(mask, new, old)
 
             env_states = jax.tree_util.tree_map(
@@ -436,34 +492,177 @@ def test(
                 next_env_states,
             )
 
-            if record_vid:
-                frame = render_craftax_pixels(get_first_env_state(env_states), 64)
-                frame = frame.astype(jnp.uint8)
-                frames.append(np.asarray(jax.device_get(frame)))
+            new_carry = (
+                obs,
+                env_states,
+                new_done_mask,
+                episode_steps,
+                episode_returns,
+                key,
+            )
 
-            done_mask = new_done_mask
-            t += 1
+            return new_carry, None
 
-        if record_vid:
-            imageio.mimsave("episode_ppo.gif", frames, fps=5)
+        carry = (
+            obs,
+            env_states,
+            done_mask,
+            episode_steps,
+            episode_returns,
+            key,
+        )
 
-        all_episode_steps.extend(list(jax.device_get(episode_steps)))
-        all_episode_returns.extend(list(jax.device_get(episode_returns)))
+        carry, _ = jax.lax.scan(
+            scan_step,
+            carry,
+            xs=None,
+            length=max_episode_steps,
+        )
+
+        _, _, done_mask, episode_steps, episode_returns, key = carry
+
+        return key, episode_steps, episode_returns, done_mask
+
+    key = jax.random.PRNGKey(seed)
+
+    num_batches = int(np.ceil(num_episodes / actors))
+
+    all_episode_steps = []
+    all_episode_returns = []
+    all_done_masks = []
+
+    for _ in range(num_batches):
+        key, episode_steps, episode_returns, done_mask = eval_batch(
+            agent.params,
+            key,
+        )
+
+        episode_steps = np.asarray(jax.device_get(episode_steps))
+        episode_returns = np.asarray(jax.device_get(episode_returns))
+        done_mask = np.asarray(jax.device_get(done_mask))
+
+        all_episode_steps.extend(episode_steps.tolist())
+        all_episode_returns.extend(episode_returns.tolist())
+        all_done_masks.extend(done_mask.tolist())
 
     all_episode_steps = all_episode_steps[:num_episodes]
     all_episode_returns = all_episode_returns[:num_episodes]
+    all_done_masks = all_done_masks[:num_episodes]
 
-    wandb.log({
-        "eval/episode_steps": all_episode_steps,
-        "eval/episode_returns": all_episode_returns,
-        "eval/mean_episode_return": np.mean(all_episode_returns),
-    })
+    mean_return = float(np.mean(all_episode_returns))
+    mean_steps = float(np.mean(all_episode_steps))
+    max_return = float(np.max(all_episode_returns))
+    min_return = float(np.min(all_episode_returns))
+    done_rate = float(np.mean(all_done_masks))
+
+    log_data = {
+        "eval/mean_episode_return": mean_return,
+        "eval/max_episode_return": max_return,
+        "eval/min_episode_return": min_return,
+        "eval/mean_episode_steps": mean_steps,
+        "eval/done_rate": done_rate,
+    }
+
+    if wandb.run is not None:
+        if wandb_step is None:
+            wandb.log(log_data)
+        else:
+            wandb.log(log_data, step=wandb_step)
+
     print("Episode steps:", all_episode_steps)
     print("Episode returns:", all_episode_returns)
-    print("Mean steps:", np.mean(all_episode_steps))
-    print("Mean return:", np.mean(all_episode_returns))
+    print("Mean steps:", mean_steps)
+    print("Mean return:", mean_return)
+    print("Done rate:", done_rate)
+
+    if record_vid:
+        record_eval_video(
+            agent,
+            env,
+            env_params,
+            max_episode_steps=max_episode_steps,
+            deterministic=deterministic,
+            seed=seed + 10_000,
+            filename="episode_ppo.gif",
+        )
+
+        if wandb.run is not None:
+            video_log = {
+                "eval/video": wandb.Video(
+                    "episode_ppo.gif",
+                    fps=5,
+                    format="gif",
+                )
+            }
+
+            if wandb_step is None:
+                wandb.log(video_log)
+            else:
+                wandb.log(video_log, step=wandb_step)
 
     return all_episode_steps, all_episode_returns
+
+def record_eval_video(
+    agent,
+    env,
+    env_params,
+    max_episode_steps=10000,
+    deterministic=False,
+    seed=123,
+    filename="episode_ppo.gif",
+):
+    """
+    Records one evaluation episode as a GIF.
+
+    This is intentionally not jitted because rendering and imageio.mimsave
+    are Python/host-side operations.
+    """
+
+    key = jax.random.PRNGKey(seed)
+
+    obs, env_state = env.reset(key, env_params)
+
+    frames = []
+
+    frame = render_craftax_pixels(env_state, 64)
+    frame = frame.astype(jnp.uint8)
+    frames.append(np.asarray(jax.device_get(frame)))
+
+    done = False
+    t = 0
+
+    while (not done) and t < max_episode_steps:
+        key, key_act, key_step = jax.random.split(key, 3)
+
+        obs_batch = obs[None, ...]
+
+        logits = agent.actor.apply(
+            agent.params["actor"],
+            obs_batch,
+            env,
+            env_params,
+        )
+
+        if deterministic:
+            action = jnp.argmax(logits, axis=-1)[0]
+        else:
+            action = jax.random.categorical(key_act, logits[0])
+
+        obs, env_state, reward, done, info = env.step(
+            key_step,
+            env_state,
+            action,
+            env_params,
+        )
+
+        frame = render_craftax_pixels(env_state, 64)
+        frame = frame.astype(jnp.uint8)
+        frames.append(np.asarray(jax.device_get(frame)))
+
+        done = bool(jax.device_get(done))
+        t += 1
+
+    imageio.mimsave(filename, frames, fps=5)
 
 
 if __name__ == "__main__":
@@ -474,7 +673,7 @@ if __name__ == "__main__":
     wandb.init(
         project="craftax",
         name="ppo-1",
-        config=configs.large_run
+        config=configs.debug_config
     )
 
     config = wandb.config
@@ -501,6 +700,6 @@ if __name__ == "__main__":
     nt = time.perf_counter()
     latency= nt - ft
     print("Training time: ", latency)
-    test(agent, env, env_params, actors=1, num_episodes=1, deterministic=False)
+    test(agent, env, env_params, actors=32, num_episodes=32, deterministic=False)
 
     # test is very inefficient. fix
