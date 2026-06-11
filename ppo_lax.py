@@ -397,7 +397,7 @@ def make_train_iteration(env, env_params, agent, config, obs_shape=(8268,)):
         params, opt_state, obs, env_states, key, total_steps, update_steps = run_state
 
         obs, env_states, key, rollout = collect_rollout(
-            agent.params,
+            params,
             obs,
             env_states,
             key,
@@ -551,7 +551,7 @@ if __name__ == "__main__":
     train_iterations = config["total_timesteps"] // (config["actors"] * config["num_steps"])
 
     train_all = make_train_all(train_iteration, train_iterations)
-    run_state, metrics = train_all(run_state)
+    run_state = train_all(run_state)
 
     params, opt_state, obs, env_states, key, total_steps, update_step = run_state
     agent.params = params
