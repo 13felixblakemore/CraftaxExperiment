@@ -2,7 +2,6 @@
 import sys
 import time
 from pickletools import uint8
-
 import imageio
 import jax
 import numpy as np
@@ -15,7 +14,6 @@ from flax import linen as nn
 
 import configs
 from test_environment import ChainEnv
-
 
 class Actor(nn.Module):
     @nn.compact
@@ -38,7 +36,6 @@ class Actor(nn.Module):
                     )(x)
         return x
 
-
 class Critic(nn.Module):
     @nn.compact
     def __call__(self, x):
@@ -59,8 +56,6 @@ class Critic(nn.Module):
                      bias_init=nn.initializers.constant(0.0)
                      )(x)
         return x
-
-
 
 class PPO:
     def __init__(self, env, env_params, optimiser, obs_shape=(8268,)):
@@ -144,6 +139,40 @@ def get_log_probs_jit(agent, env):
         return action_log_probs, log_probs_all
     return get_action_log_probs
 
+
+def wandb_callback(metrics, step):
+    def to_python(x):
+        x = np.asarray(x)
+        if x.shape == ():
+            return x.item()
+        return x
+
+    metrics_host = jax.tree_util.tree_map(to_python, metrics)
+    step_host = int(np.asarray(step).item())
+
+    wandb.log(metrics_host, step=step_host)
+
+def maybe_log(metrics, total_steps, update_step, log_every):
+    should_log = (update_step % log_every) == 0
+
+    def do_log(_):
+        jax.debug.callback(
+            wandb_callback,
+            metrics,
+            total_steps,
+            ordered=True,
+        )
+        return None
+
+    def dont_log(_):
+        return None
+
+    jax.lax.cond(
+        should_log,
+        do_log,
+        dont_log,
+        operand=None,
+    )
 
 def make_training_step(agent, env, optimiser):
     @jax.jit
@@ -364,9 +393,8 @@ def make_train_iteration(env, env_params, agent, config, obs_shape=(8268,)):
 
         return params, opt_state, key, mean_metrics
 
-    @jax.jit
     def train_iteration(run_state):
-        params, opt_state, obs, env_states, key, total_steps = run_state
+        params, opt_state, obs, env_states, key, total_steps, update_steps = run_state
 
         obs, env_states, key, rollout = collect_rollout(
             agent.params,
@@ -435,10 +463,39 @@ def make_train_iteration(env, env_params, agent, config, obs_shape=(8268,)):
             **mean_metrics,
         }
 
-        run_state = params, opt_state, obs, env_states, key, total_steps
+        maybe_log(
+            metrics,
+            total_steps,
+            update_step,
+            log_every=10,
+        )
+
+        update_steps += 1
+
+        run_state = params, opt_state, obs, env_states, key, total_steps, update_steps
 
         return run_state, metrics
     return train_iteration
+
+def make_train_all(train_iteration, num_iterations):
+    @jax.jit
+    def train_all(runner_state):
+        def scan_step(runner_state, _):
+            runner_state, metrics = train_iteration(runner_state)
+
+            # Don't return metrics unless you want all metrics stored
+            return runner_state, None
+
+        runner_state, _ = jax.lax.scan(
+            scan_step,
+            runner_state,
+            xs=None,
+            length=num_iterations,
+        )
+
+        return runner_state
+
+    return train_all
 
 if __name__ == "__main__":
     env = make_craftax_env_from_name("Craftax-Symbolic-v1", auto_reset=True)
@@ -482,7 +539,8 @@ if __name__ == "__main__":
         obs,
         env_states,
         key,
-        jnp.array(0),
+        jnp.array(0, dtype=jnp.int32),
+        jnp.array(0, dtype=jnp.int32),
     )
 
     batched_step = jax.vmap(env.step, in_axes=(0, 0, 0, None))
@@ -490,17 +548,11 @@ if __name__ == "__main__":
 
     train_iteration = make_train_iteration(env, env_params, agent, config, obs_shape=shape)
 
-    train_iterations = 100
-    for iteration in range(train_iterations):
-        run_state, metrics = train_iteration(run_state)
+    train_iterations = config["total_timesteps"] // (config["actors"] * config["num_steps"])
 
-        if iteration % 10 == 0:
-            metrics = jax.device_get(metrics)
-            wandb.log(
-                {k: float(v) for k, v in metrics.items()},
-                step=int(metrics["charts/total_steps"]),
-            )
+    train_all = make_train_all(train_iteration, train_iterations)
+    run_state, metrics = train_all(run_state)
 
-    params, opt_state, obs, env_states, key, total_steps = run_state
+    params, opt_state, obs, env_states, key, total_steps, update_step = run_state
     agent.params = params
     agent.opt_state = opt_state
