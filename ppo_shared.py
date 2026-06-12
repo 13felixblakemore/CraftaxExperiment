@@ -345,12 +345,13 @@ def make_train(config):
             }
 
             jax.debug.callback(log_callback, log_data, global_step)
-            jax.lax.cond(
-                update_idx % config["log_every"] == 0,
-                lambda _: jax.debug.callback(log_callback, log_data, update_idx),
-                lambda _: None,
-                operand=None,
-            )
+            if config["log"]:
+                jax.lax.cond(
+                    update_idx % config["log_every"] == 0,
+                    lambda _: jax.debug.callback(log_callback, log_data, update_idx),
+                    lambda _: None,
+                    operand=None,
+                )
 
             rng = update_state[-1]
 
