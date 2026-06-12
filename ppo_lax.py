@@ -2,6 +2,8 @@
 import sys
 import time
 from pickletools import uint8
+
+import distrax
 import imageio
 import jax
 import numpy as np

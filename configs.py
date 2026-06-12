@@ -13,6 +13,7 @@ training_config = {
     "epsilon": 0.2,
     "ent_coef": 0.01,
     "vf_coef": 0.5,
+    "log__every": 10,
 }
 
 large_run = {
@@ -30,6 +31,7 @@ large_run = {
     "epsilon": 0.2,
     "ent_coef": 0.01,
     "vf_coef": 0.5,
+    "log_every": 50,
 }
 
 debug_config = {
@@ -47,4 +49,5 @@ debug_config = {
     "epsilon": 0.2,
     "ent_coef": 0.01,
     "vf_coef": 0.5,
+    "log_every": 1,
 }
