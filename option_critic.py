@@ -236,11 +236,13 @@ def make_train(config):
         rng, _rng = jax.random.split(rng)
         run_state = (train_state, obs, env_states, option, _rng, jnp.array(0))
 
+        steps = config["total_timesteps"] // config["batch_size"]
+
         run_state, _ = jax.lax.scan(
             update_step,
             run_state,
             None,
-            length=config["num_steps"],
+            length=steps,
         )
 
         return {"runner_state": run_state}
