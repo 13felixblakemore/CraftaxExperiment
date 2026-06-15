@@ -1,4 +1,5 @@
 training_config = {
+    "batch_size": 128,
     "actors" : 256,
     "num_steps" : 128,
     "num_minibatches" : 64,
@@ -13,11 +14,12 @@ training_config = {
     "epsilon": 0.2,
     "ent_coef": 0.01,
     "vf_coef": 0.5,
-    "log_every": 10,
-    "log": False,
+    "log_every": 1,
+    "log": True,
 }
 
 large_run = {
+    "batch_size": 128,
     "actors" : 1024,
     "num_steps" : 64,
     "num_minibatches" : 8,
@@ -32,11 +34,12 @@ large_run = {
     "epsilon": 0.2,
     "ent_coef": 0.01,
     "vf_coef": 0.5,
-    "log_every": 1000,
+    "log_every": 25,
     "log": True,
 }
 
 debug_config = {
+    "batch_size" : 4,
     "actors" : 8,
     "num_steps" : 32,
     "num_minibatches" : 8,
@@ -52,5 +55,5 @@ debug_config = {
     "ent_coef": 0.01,
     "vf_coef": 0.5,
     "log_every": 1,
-    "log": False,
+    "log": True,
 }
