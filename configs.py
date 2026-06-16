@@ -39,7 +39,6 @@ large_run = {
 }
 
 debug_config = {
-    "batch_size" : 4,
     "actors" : 8,
     "num_steps" : 32,
     "num_minibatches" : 8,
@@ -54,6 +53,24 @@ debug_config = {
     "epsilon": 0.2,
     "ent_coef": 0.01,
     "vf_coef": 0.5,
+    "log_every": 1,
+    "log": True,
+}
+
+debug_oc = {
+    "batch_size" : 4,
+    "actors" : 8,
+    "num_steps" : 32,
+    "num_minibatches" : 8,
+    "update_epochs" : 4,
+    "total_timesteps" : 1_000,
+    "learning_rate" : 2.5e-4,
+    "end_learning_rate" : 0,
+    "adam_epsilon" : 1e-5,
+    "max_grad_norm" : 0.5,
+    "gamma": 0.99,
+    "epsilon": 0.2,
+    "ent_coef": 0.01,
     "log_every": 1,
     "log": True,
 }
