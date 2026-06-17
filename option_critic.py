@@ -269,7 +269,7 @@ def make_train(config):
 
                         termination_advantage = q_next_o - v_next
                         termination_advantage = jax.lax.stop_gradient(
-                            termination_advantage + config.get("delib_cost", 0.0)
+                            termination_advantage + config.get("delib_cost", 0.01)
                         )
 
                         nonterminal = 1.0 - rollout.done.astype(jnp.float32)
