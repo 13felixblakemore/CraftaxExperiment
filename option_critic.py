@@ -58,7 +58,7 @@ def make_train(config):
     env_params = env.default_params
     env = LogWrapper(env)
 
-    num_options = 4
+    num_options = 8
     batch_size = config["actors"] * config["num_steps"]
     num_updates = config["total_timesteps"] // batch_size
     config["minibatch_size"] = batch_size // config["num_minibatches"]
@@ -395,10 +395,9 @@ def make_train(config):
 
         return {"runner_state": run_state}
     return train
-# need replay buffer for decorrelated samples.
 
 if __name__ == '__main__':
-    wandb.init(project="craftax", name="option_critic", config=configs.large_run,)
+    wandb.init(project="craftax", name="option_critic_8", config=configs.large_run,)
     config = wandb.config
 
     train = jax.jit(make_train(config))
