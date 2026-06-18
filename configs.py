@@ -29,7 +29,7 @@ large_run = {
     "update_epochs" : 4,
     "total_timesteps" : 1_000_000_000,
     "learning_rate" : 2e-4,
-    "end_learning_rate" : 0,
+    "end_learning_rate" : 1e-7,
     "adam_epsilon" : 1e-5,
     "max_grad_norm" : 0.5,
     "gamma": 0.99,
