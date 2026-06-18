@@ -46,7 +46,7 @@ class OptionCritic(nn.Module):
         s = nn.relu(s)
 
         q_w = nn.Dense(self.num_options)(s) # q_w shape: (n) -- choose policy with epsilon greedy
-        b = nn.Dense(self.num_options)(s) # b shape: (n) -- terminate the active option i with probability b_i (sigmoid)
+        b = nn.Dense(self.num_options, bias_init=nn.initializers.constant(-2.0))(s) # b shape: (n) -- terminate the active option i with probability b_i (sigmoid)
         actions = nn.Dense(self.num_options * self.action_dim)(s) # actions shape: (n * action_dim)
         actions = actions.reshape((s.shape[0], self.num_options, self.action_dim)) # actions shape: (n, action_dim)
 
@@ -113,7 +113,7 @@ def make_train(config):
             return jnp.where(choose_random, random_option, greedy_option)
 
         rng, _rng = jax.random.split(rng)
-        option = epsilon_greedy_options(_rng, q_w, config["epsilon"])
+        option = epsilon_greedy_options(_rng, q_w, config["epsilon_option"])
 
         def log_callback(log_data, global_step):
             log_data = {k: float(v) for k, v in log_data.items()}
@@ -150,7 +150,7 @@ def make_train(config):
                 terminate = dones | jax.random.bernoulli(_rng, b_next_o)
 
                 rng, _rng = jax.random.split(_rng)
-                new_option = epsilon_greedy_options(_rng, q_w, config["epsilon"])
+                new_option = epsilon_greedy_options(_rng, q_w, config["epsilon_option"])
                 new_option = jnp.where((terminate == 1), new_option, option)
 
                 transition = Transition(dones, actions, values, rewards, log_probs, obs, next_obs, infos, option, b)
@@ -175,8 +175,7 @@ def make_train(config):
             def compute_gae(rollout, last_q, last_b, option):
                 def gae_step(carry, transition):
                     last_gae, next_value, next_b = carry
-                    reward, value, done, option, b = transition
-                    b = nn.sigmoid(b)
+                    reward, value, done, option, rollout_b_logits = transition
                     next_b = nn.sigmoid(next_b)
 
                     next_non_terminal = 1.0 - done.astype(jnp.float32)
@@ -193,7 +192,7 @@ def make_train(config):
                             * last_gae
                     )
 
-                    return (last_gae, value, b), last_gae
+                    return (last_gae, value, rollout_b_logits), last_gae
 
                 initial_carry = (
                     jnp.zeros_like(option, dtype=jnp.float32),
