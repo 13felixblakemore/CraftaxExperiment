@@ -22,8 +22,8 @@ large_run = {
     "batch_size": 128,
     "actors" : 1024,
     "num_steps" : 64,
-    "num_minibatches" : 8,
-    "update_epochs" : 4,
+    "num_minibatches" : 4,
+    "update_epochs" : 2,
     "total_timesteps" : 1_000_000_000,
     "learning_rate" : 2e-4,
     "end_learning_rate" : 0,
@@ -35,7 +35,7 @@ large_run = {
     "ent_coef": 0.01,
     "vf_coef": 0.5,
     "log_every": 25,
-    "log": True,
+    "log": False,
 }
 
 debug_config = {

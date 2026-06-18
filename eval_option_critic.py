@@ -74,7 +74,7 @@ run = wandb.init(
 )
 
 model_artifact = run.use_artifact(
-    "13felixblakemore-uob/craftax/option_critic-final-model:latest",
+    "13felixblakemore-uob/craftax/option_critic_8-final-model:latest",
     type="model",
 )
 
@@ -91,7 +91,7 @@ for root, dirs, files in os.walk(ckpt_dir):
 env = make_craftax_env_from_name("Craftax-Symbolic-v1", auto_reset=True)
 env_params = env.default_params
 
-num_options = 4
+num_options = 8
 action_dim = env.action_space(env_params).n
 
 agent = OptionCritic(num_options, action_dim)

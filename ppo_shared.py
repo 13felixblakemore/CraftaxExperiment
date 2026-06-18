@@ -36,7 +36,6 @@ class Transition(NamedTuple):
     obs: jnp.ndarray
     info: jnp.ndarray
 
-
 class LogEnvState(NamedTuple):
     env_state: Any
     episode_return: jnp.ndarray
@@ -94,7 +93,6 @@ class LogWrapper(GymnaxWrapper):
         )
 
         return obs, new_state, reward, done, info
-
 
 class ActorCritic(nn.Module):
     action_dim: int
@@ -344,11 +342,10 @@ def make_train(config):
                 "episode_length": episode_length,
             }
 
-            jax.debug.callback(log_callback, log_data, global_step)
             if config["log"]:
                 jax.lax.cond(
                     update_idx % config["log_every"] == 0,
-                    lambda _: jax.debug.callback(log_callback, log_data, update_idx),
+                    lambda _: jax.debug.callback(log_callback, log_data, global_step),
                     lambda _: None,
                     operand=None,
                 )
@@ -376,6 +373,7 @@ def make_train(config):
     return train
 
 if __name__ == "__main__":
+    t = time.perf_counter()
     wandb.init(
         project="craftax",
         name="ppo-1",
@@ -384,9 +382,11 @@ if __name__ == "__main__":
 
     config = wandb.config
 
-    rng = jax.random.PRNGKey(30)
+    rng = jax.random.PRNGKey(5)
     train_jit = jax.jit(make_train(config))
     out = train_jit(rng)
+    a = time.perf_counter()
+    print("training time:", a - t)
     final_train_state = out["runner_state"][0]
     params = final_train_state.params
 
