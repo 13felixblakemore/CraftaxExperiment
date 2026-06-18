@@ -17,6 +17,8 @@ from flax import linen as nn
 
 from configs import debug_config
 from ppo_shared import LogWrapper
+from wrappers import OptimisticResetVecEnvWrapper
+
 
 class Transition(NamedTuple):
     done: jnp.ndarray
@@ -57,6 +59,11 @@ def make_train(config):
     env = make_craftax_env_from_name("Craftax-Symbolic-v1", auto_reset=True)
     env_params = env.default_params
     env = LogWrapper(env)
+    env = OptimisticResetVecEnvWrapper(
+        env,
+        num_envs=config["actors"],
+        reset_ratio=min(16, config["actors"]),
+    )
 
     num_options = 8
     batch_size = config["actors"] * config["num_steps"]
@@ -88,9 +95,8 @@ def make_train(config):
             tx=optimiser,)
 
         rng, _rng = jax.random.split(rng)
-        keys = jax.random.split(_rng, config["actors"])
 
-        obs, env_states = jax.vmap(env.reset, in_axes=(0, None))(keys, env_params)
+        obs, env_states = env.reset(_rng, env_params)
 
         # choose w according to Q_w(obs)
         q_w, b, action_logits = network.apply(train_state.params, obs)
@@ -133,9 +139,8 @@ def make_train(config):
                 log_probs = policy.log_prob(actions)
 
                 rng, _rng = jax.random.split(_rng)
-                keys = jax.random.split(_rng, config["actors"])
-                next_obs, next_env_states, rewards, dones, infos = jax.vmap(env.step, in_axes=(0, 0, 0, None))(
-                    keys,
+                next_obs, next_env_states, rewards, dones, infos = env.step(
+                    _rng,
                     env_states,
                     actions,
                     env_params,
@@ -401,7 +406,7 @@ if __name__ == '__main__':
 
     train = jax.jit(make_train(config))
 
-    rng = jax.random.PRNGKey(67)
+    rng = jax.random.PRNGKey(3)
     rng, _rng = jax.random.split(rng)
     run_state = train(_rng)
     final_train_state = run_state["runner_state"][0]

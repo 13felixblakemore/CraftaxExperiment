@@ -1,4 +1,5 @@
 {
+  "num_options": 4,
   "actors": 8,
   "num_steps": 32,
   "num_minibatches": 8,
@@ -11,8 +12,10 @@
   "gamma": 0.99,
   "lambda": 0.8,
   "epsilon": 0.2,
+  "epsilon_option": 0.1,
   "ent_coef": 0.01,
   "vf_coef": 0.5,
+  "beta_coef": 0.1,
   "log_every": 1,
   "log": true,
   "minibatch_size": 32

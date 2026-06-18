@@ -39,7 +39,7 @@ large_run = {
     "ent_coef": 0.01,
     "vf_coef": 0.5,
     "beta_coef": 0.1,
-    "log_every": 1000,
+    "log_every": 50,
     "log": True,
 }
 
