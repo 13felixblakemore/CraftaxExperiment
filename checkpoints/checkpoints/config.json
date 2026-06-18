@@ -1,4 +1,5 @@
 {
+  "batch_size": 128,
   "actors": 1024,
   "num_steps": 64,
   "num_minibatches": 8,
@@ -13,7 +14,7 @@
   "epsilon": 0.2,
   "ent_coef": 0.01,
   "vf_coef": 0.5,
-  "log_every": 1000,
+  "log_every": 25,
   "log": true,
   "minibatch_size": 8192
 }
