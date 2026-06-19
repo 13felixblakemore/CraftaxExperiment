@@ -1,113 +1,122 @@
+import argparse
+import os
 import sys
 import time
 
-import imageio
 import jax
-import jax.numpy as jnp
 import numpy as np
-import optax
-from craftax.craftax_env import make_craftax_env_from_name
-from craftax.craftax.renderer import render_craftax_pixels, render_craftax_symbolic
-from gymnax.visualize import Visualizer
-from dqn import DQN, QNetwork, ReplayBuffer
+from flax.training import orbax_utils
+from orbax.checkpoint import CheckpointManagerOptions, CheckpointManager
+from orbax.checkpoint._src.checkpointers.pytree_checkpointer import PyTreeCheckpointer
 
-# Create environment
-env = make_craftax_env_from_name("Craftax-Symbolic-v1", auto_reset=True)
-env_params = env.default_params
-
-q_net = QNetwork()
-schedule = optax.linear_schedule(
-    init_value = 1e-3,
-    end_value = 1e-5,
-    transition_steps = 500,
-)
-optimiser = optax.adam(schedule)
-replay_buffer = ReplayBuffer(500, 16)
-agent = DQN(q_net, optimiser, replay_buffer, epsilon=0.9, decay=0.05, decay_steps=10000)
-
-def train(num_episodes=10):
-    total_steps = 0
-    key = jax.random.PRNGKey(0)
-    key, key_reset = jax.random.split(key)
-    for episode in range(num_episodes):
-        obs, env_state = env.reset(key_reset, env_params)
-        state_seq, reward_seq = [], []
-
-        print("Episode:", episode)
-
-        while True:
-            state_seq.append(env_state)
-
-            key, key_act, key_step = jax.random.split(key, 3)
-
-            frame = render_craftax_pixels(env_state, 16)
-            action = agent.choose_action(frame, env_params, env, key_act)
-            next_obs, next_env_state, reward, done, info = env.step(
-                key_step, env_state, action, env_params
-            )
-            reward_seq.append(reward)
-
-            next_frame = render_craftax_pixels(next_env_state, 16)
-
-            if replay_buffer:
-                replay_buffer.store_transition(frame, action, reward, next_frame, done)
-
-                if len(replay_buffer) > replay_buffer.batch_size:
-                    agent.learn()
-            else:
-                pass # insert ppo learning here
-
-            total_steps += 1
-
-            if total_steps % 15 == 0:
-                print(f"Step {total_steps}: {schedule(agent.step)}")
-
-            if done:
-                break
-            else:
-              obs = next_obs
-              env_state = next_env_state
+import ppo_shared
+import wandb
 
 
-def test(num_episodes=1):
-    key = jax.random.PRNGKey(0)
-    frames = []
-    ep_steps = []
-    for i in range(num_episodes):
-        print(i)
-        episode_steps = 0
-        key, key_reset = jax.random.split(key, 2)
-        obs, env_state = env.reset(key_reset, env_params)
-        state_seq, reward_seq = [], []
-        while True:
-            episode_steps += 1
-            state_seq.append(obs)
+def run(config):
+    config = {k.upper(): v for k, v in config.__dict__.items()}
 
-            key, key_act, key_step = jax.random.split(key, 3)
+    if config["USE_WANDB"]:
+        wandb.init(
+            project=config["WANDB_PROJECT"],
+            entity=config["WANDB_ENTITY"],
+            config=config,
+            name=config["ENV_NAME"]
+            + "-"
+            + str(int(config["TOTAL_TIMESTEPS"] // 1e6))
+            + "M",
+        )
 
-            frame = render_craftax_pixels(env_state, 16)
-            action = agent.choose_action(frame, env_params, env, key_act)
-            next_obs, next_env_state, reward, done, info = env.step(
-                key_step, env_state, action, env_params
+    rng = jax.random.PRNGKey(config["SEED"])
+    rngs = jax.random.split(rng, config["NUM_REPEATS"])
+
+    if config["ALGORITHM"] == "PPO":
+        make_train = ppo_shared.make_train
+    else:
+        raise ValueError("Unsupported PPO algorithm.")
+
+    train_jit = jax.jit(make_train(config))
+    train_vmap = jax.vmap(train_jit)
+
+    t0 = time.time()
+    out = train_vmap(rngs)
+    jax.block_until_ready(out)
+    t1 = time.time()
+    print("Time to run experiment", t1 - t0)
+    print("SPS: ", config["TOTAL_TIMESTEPS"] / (t1 - t0))
+
+    if config["USE_WANDB"]:
+
+        def _save_network(rs_index, dir_name):
+            train_states = out["runner_state"][rs_index]
+            train_state = jax.tree.map(lambda x: x[0], train_states)
+            orbax_checkpointer = PyTreeCheckpointer()
+            options = CheckpointManagerOptions(max_to_keep=1, create=True)
+            path = os.path.join(wandb.run.dir, dir_name)
+            checkpoint_manager = CheckpointManager(path, orbax_checkpointer, options)
+            print(f"saved runner state to {path}")
+            save_args = orbax_utils.save_args_from_target(train_state)
+            checkpoint_manager.save(
+                config["TOTAL_TIMESTEPS"],
+                train_state,
+                save_kwargs={"save_args": save_args},
             )
 
-            frame = frame.astype(jnp.uint8)
-            frames.append(frame)
+        if config["SAVE_POLICY"]:
+            _save_network(0, "policies")
 
-            if done:
-                break
-            else:
-                obs = next_obs
-                env_state = next_env_state
-        ep_steps.append(episode_steps)
-    print(ep_steps)
-    imageio.mimsave("episode.gif", frames, fps=5)
 
-t = time.perf_counter()
-train(1)
-nt = time.perf_counter()
-latency= nt - t
-print("Latency: ", latency)
-#cum_rewards = jnp.cumsum(jnp.array(reward_seq))
-#vis = Visualizer(env, env_params, state_seq, cum_rewards)
-#vis.animate(f"anim.gif")
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--env_name", type=str, default="Craftax-Symbolic-v1")
+    parser.add_argument("--algorithm", type=str, default="PPO")
+    parser.add_argument(
+        "--num_envs",
+        type=int,
+        default=1024,
+    )
+    parser.add_argument(
+        "--total_timesteps", type=lambda x: int(float(x)), default=1e9
+    )
+    parser.add_argument("--lr", type=float, default=2e-4)
+    parser.add_argument("--num_steps", type=int, default=64)
+    parser.add_argument("--update_epochs", type=int, default=4)
+    parser.add_argument("--num_minibatches", type=int, default=8)
+    parser.add_argument("--gamma", type=float, default=0.99)
+    parser.add_argument("--gae_lambda", type=float, default=0.8)
+    parser.add_argument("--clip_eps", type=float, default=0.2)
+    parser.add_argument("--ent_coef", type=float, default=0.01)
+    parser.add_argument("--vf_coef", type=float, default=0.5)
+    parser.add_argument("--max_grad_norm", type=float, default=1.0)
+    parser.add_argument("--activation", type=str, default="tanh")
+    parser.add_argument(
+        "--anneal_lr", action=argparse.BooleanOptionalAction, default=True
+    )
+    parser.add_argument("--debug", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--jit", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--seed", type=int)
+    parser.add_argument(
+        "--use_wandb", action=argparse.BooleanOptionalAction, default=True
+    )
+    parser.add_argument("--save_policy", action="store_true")
+    parser.add_argument("--num_repeats", type=int, default=1)
+    parser.add_argument("--layer_size", type=int, default=512)
+    parser.add_argument("--wandb_project", type=str)
+    parser.add_argument("--wandb_entity", type=str)
+    parser.add_argument(
+        "--use_optimistic_resets", action=argparse.BooleanOptionalAction, default=True
+    )
+    parser.add_argument("--optimistic_reset_ratio", type=int, default=16)
+
+    args, rest_args = parser.parse_known_args(sys.argv[1:])
+    if rest_args:
+        raise ValueError(f"Unknown args {rest_args}")
+
+    if args.seed is None:
+        args.seed = np.random.randint(2**31)
+
+    if args.jit:
+        run(args)
+    else:
+        with jax.disable_jit():
+            run(args)
