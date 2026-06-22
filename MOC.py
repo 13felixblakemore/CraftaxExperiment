@@ -236,13 +236,12 @@ def make_train(config):
 
                         B = rollout.obs.shape[0]
                         batch_idx = jnp.arange(B)
-                        options = rollout.option.astype(jnp.int32)
+                        options = rollout.option.astype(jnp.int32) # B options, 0 -> N
 
-                        logits_o = action_logits[batch_idx, :]
-
+                        logits_o = action_logits[batch_idx, :] # Action logits for the active option in each rollout trajectory.
                         policy = distrax.Categorical(logits=logits_o)
 
-                        new_log_probs = policy.log_prob(jnp.expand_dims(rollout.action, -1))
+                        new_log_probs = policy.log_prob(jnp.expand_dims(rollout.action, -1)) # Log probs of the taken action for each option.
                         old_log_probs = rollout.log_prob
                         log_ratio = new_log_probs - old_log_probs
                         ratio = jnp.exp(log_ratio)
@@ -256,6 +255,7 @@ def make_train(config):
                         min = jnp.minimum(loss1, loss2)
 
                         importance = new_log_probs - old_log_probs[jnp.arange(config["MINIBATCH_SIZE"]), options, None]
+                        importance = jnp.exp(importance)
 
                         greedy_options = jnp.argmax(q_w_next, axis=-1)
 
@@ -278,8 +278,8 @@ def make_train(config):
 
                         p_arrival = beta * option_probs + (1-beta) * one_hot
 
-                        weighted = min * p_arrival * importance
-                        actor_loss = -jnp.mean(weighted)
+                        weight = p_arrival * importance
+                        actor_loss = -jnp.mean(weight * min)
 
                         entropy = policy.entropy().mean()
 
@@ -287,10 +287,12 @@ def make_train(config):
                         batch_idx = jnp.arange(B)
 
                         values = q_w[batch_idx]
-                        critic_loss = jnp.mean(p_arrival * importance * (values - returns) ** 2)
+                        critic_loss = jnp.mean(weight * (values - returns) ** 2)
 
                         b_next = nn.sigmoid(b_next_logits)
                         beta_next_o = b_next[batch_idx, options]
+                        beta_next_o = jnp.expand_dims(beta_next_o, -1)
+
                         q_next_o = q_w_next[batch_idx, options]
 
                         # Greedy baseline version
@@ -300,8 +302,10 @@ def make_train(config):
                         termination_advantage = jax.lax.stop_gradient(
                             termination_advantage + config["DELIB_COST"]
                         )
+                        termination_advantage = jnp.expand_dims(termination_advantage, -1)
 
                         nonterminal = 1.0 - rollout.done.astype(jnp.float32)
+                        nonterminal = jnp.expand_dims(nonterminal, -1)
 
                         termination_loss = jnp.mean(
                             importance * p_arrival * nonterminal * beta_next_o * termination_advantage
