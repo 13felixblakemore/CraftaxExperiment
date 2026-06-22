@@ -11,6 +11,8 @@ import jax
 import jax.numpy as jnp
 
 
+# env for testing basic correctness
+
 class Discrete:
     def __init__(self, n):
         self.n = n

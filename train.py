@@ -39,7 +39,7 @@ def run(config):
     elif config["ALGORITHM"] == "MOC":
         make_train = MOC.make_train
     else:
-        raise ValueError("Unsupported PPO algorithm.")
+        raise ValueError("Unsupported algorithm.")
 
     train_jit = jax.jit(make_train(config))
     train_vmap = jax.vmap(train_jit)

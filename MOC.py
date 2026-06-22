@@ -10,12 +10,10 @@ import optax
 from flax.serialization import to_bytes
 from flax.training.train_state import TrainState
 
-import configs
 import wandb
 from craftax.craftax_env import make_craftax_env_from_name
 from flax import linen as nn
 
-from configs import debug_config
 from logz.batch_logging import create_log_dict, batch_log
 from ppo_shared import LogWrapper
 from wrappers import OptimisticResetVecEnvWrapper, AutoResetEnvWrapper, BatchEnvWrapper
