@@ -9,6 +9,7 @@ from flax.training import orbax_utils
 from orbax.checkpoint import CheckpointManagerOptions, CheckpointManager
 from orbax.checkpoint._src.checkpointers.pytree_checkpointer import PyTreeCheckpointer
 
+import MOC
 import option_critic
 import ppo_shared
 import wandb
@@ -35,6 +36,8 @@ def run(config):
         make_train = ppo_shared.make_train
     elif config["ALGORITHM"] == "OPTION_CRITIC":
         make_train = option_critic.make_train
+    elif config["ALGORITHM"] == "MOC":
+        make_train = MOC.make_train
     else:
         raise ValueError("Unsupported PPO algorithm.")
 
@@ -100,12 +103,14 @@ if __name__ == "__main__":
     parser.add_argument("--num_options", type=int, default=4)
     parser.add_argument("--option_policy_eps", type=float, default=0.1)
     parser.add_argument("--delib_cost", type=float, default=0.05)
+    # MOC
+    parser.add_argument("--eta", type=float, default=0.9)
 
     parser.add_argument("--debug", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--jit", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--seed", type=int)
     parser.add_argument(
-        "--use_wandb", action=argparse.BooleanOptionalAction, default=True
+        "--use_wandb", action=argparse.BooleanOptionalAction, default=False
     )
     parser.add_argument("--save_policy", action="store_true")
     parser.add_argument("--num_repeats", type=int, default=1)
