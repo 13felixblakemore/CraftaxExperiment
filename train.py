@@ -24,7 +24,7 @@ def run(config):
             project=config["WANDB_PROJECT"],
             entity=config["WANDB_ENTITY"],
             config=config,
-            name=config["ENV_NAME"]
+            name=config["ALGORITHM"]+"-"+config["TOTAL_TIMESTEPS"]
             + "-"
             + str(int(config["TOTAL_TIMESTEPS"] // 1e6))
             + "M",
