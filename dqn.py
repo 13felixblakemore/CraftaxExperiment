@@ -1,172 +1,346 @@
-# incomplete
-
+from __future__ import annotations
+from typing import Sequence
 import jax
 import numpy as np
 import jax.numpy as jnp
 import optax
-from flax import linen as nn
+from craftax.craftax_env import make_craftax_env_from_name
+from flax import linen as nn, struct
+from flax.training.train_state import TrainState
+
+from wrappers import LogWrapper, AutoResetEnvWrapper, OptimisticResetVecEnvWrapper, BatchEnvWrapper
 
 
+@struct.dataclass
+class Transition:
+    state: jax.Array
+    action: jax.Array
+    reward: jax.Array
+    next_state: jax.Array
+    done: jax.Array
+
+@struct.dataclass
 class ReplayBuffer:
-    def __init__(self, capacity, batch_size, state_shape=(208,176,3)):
-        self.capacity = capacity
-        self.batch_size = batch_size
-        self.write_index = 0
-        self.size = 0
-        self.state_shape = state_shape
+    states: jax.Array
+    actions: jax.Array
+    rewards: jax.Array
+    next_states: jax.Array
+    dones: jax.Array
 
-        self.states = jnp.zeros((capacity, *self.state_shape), dtype=jnp.float32)
-        self.actions = jnp.zeros(capacity, dtype=jnp.int32)
-        self.rewards = jnp.zeros(capacity, dtype=jnp.float32)
-        self.next_states = jnp.zeros((capacity, *state_shape), dtype=jnp.float32)
-        self.dones = jnp.zeros(capacity, dtype=jnp.float32)
+    write_index: jax.Array
+    size: jax.Array
 
-    def __len__(self):
-        return self.size
+    # Static metadata: these are not transformed as JAX arrays.
+    capacity: int = struct.field(pytree_node=False)
+    warmup: int = struct.field(pytree_node=False)
+    batch_size: int = struct.field(pytree_node=False)
 
-    def sample_traj(self):
-        indices = np.random.choice(self.size, self.batch_size, replace=False)
+    @classmethod
+    def create(
+        cls,
+        capacity: int,
+        batch_size: int,
+        warmup: int,
+        state_shape: Sequence[int],
+        action_shape: Sequence[int] = (),
+        action_dtype=jnp.float32,
+        state_dtype=jnp.float32,
+    ) -> ReplayBuffer:
+        """Allocate an empty replay buffer."""
 
-        return (
-            self.states[indices],
-            self.actions[indices],
-            self.rewards[indices],
-            self.next_states[indices],
-            self.dones[indices]
+        return cls(
+            states=jnp.zeros(
+                (capacity, *state_shape),
+                dtype=state_dtype,
+            ),
+            actions=jnp.zeros(
+                (capacity, *action_shape),
+                dtype=action_dtype,
+            ),
+            rewards=jnp.zeros(
+                (capacity,),
+                dtype=jnp.float32,
+            ),
+            next_states=jnp.zeros(
+                (capacity, *state_shape),
+                dtype=state_dtype,
+            ),
+            dones=jnp.zeros(
+                (capacity,),
+                dtype=jnp.bool_,
+            ),
+            write_index=jnp.array(0, dtype=jnp.int32),
+            size=jnp.array(0, dtype=jnp.int32),
+            capacity=capacity,
+            batch_size=batch_size,
+            warmup=warmup,
         )
 
-    def store_transition(self, state, action, reward, next_state, done):
-        if self.write_index < self.capacity:
-            self.states = self.states.at[self.write_index].set(state)
-            self.actions = self.actions.at[self.write_index].set(action)
-            self.rewards = self.rewards.at[self.write_index].set(reward)
-            self.next_states = self.next_states.at[self.write_index].set(next_state)
-            self.dones = self.dones.at[self.write_index].set(done)
-            self.write_index += 1
-        else:
-            self.write_index = (self.write_index + 1) % self.capacity
-            self.store_transition(state, action, reward, next_state, done)
-        self.size = min(self.size + 1, self.capacity)
-        if self.size == self.batch_size:
-            print("Learning")
+    def add_batch(self, batch: Transition) -> ReplayBuffer:
+        """
+        Add B transitions.
+
+        batch.state has shape:
+            (B, *state_shape)
+
+        Assumes B <= capacity.
+        """
+        num_added = batch.state.shape[0]
+
+        if num_added > self.capacity:
+            raise ValueError(
+                "The inserted batch cannot exceed replay capacity."
+            )
+
+        indices = (
+            self.write_index
+            + jnp.arange(num_added, dtype=jnp.int32)
+        ) % self.capacity
+
+        return self.replace(
+            states=self.states.at[indices].set(batch.state),
+            actions=self.actions.at[indices].set(batch.action),
+            rewards=self.rewards.at[indices].set(batch.reward),
+            next_states=self.next_states.at[indices].set(
+                batch.next_state
+            ),
+            dones=self.dones.at[indices].set(
+                batch.done
+            ),
+            write_index=(
+                self.write_index + num_added
+            ) % self.capacity,
+            size=jnp.minimum(
+                self.size + num_added,
+                self.capacity,
+            ),
+        )
+
+    def add(self, transition: Transition) -> ReplayBuffer:
+        """Add a single transition."""
+
+        batch = jax.tree.map(
+            lambda x: jnp.expand_dims(x, axis=0),
+            transition,
+        )
+
+        return self.add_batch(batch)
+
+    def sample(
+        self,
+        rng: jax.Array,
+    ) -> Transition:
+        """
+        Sample with replacement.
+
+        Only call once size > 0, and preferably once
+        size >= batch_size.
+        """
+        indices = jax.random.randint(
+            rng,
+            shape=(self.batch_size,),
+            minval=0,
+            maxval=self.size,
+            dtype=jnp.int32,
+        )
+
+        return Transition(
+            state=self.states[indices],
+            action=self.actions[indices],
+            reward=self.rewards[indices],
+            next_state=self.next_states[indices],
+            done=self.dones[indices],
+        )
+
+    def can_sample(self) -> jax.Array:
+        return self.size >= self.batch_size and self.size >= self.warmup
 
 class QNetwork(nn.Module):
     @nn.compact
     def __call__(self, x):
-        x = nn.Conv(features=16, kernel_size=(8,), strides=4, padding='VALID')(x)
-        x = nn.relu(x)
-
-        x = nn.Conv(features=32, kernel_size=(4,), strides=2, padding='VALID')(x)
-        x = nn.relu(x)
-
-        x = x.reshape((x.shape[0], -1))
         x = nn.Dense(256)(x)
         x = nn.relu(x)
-
-
+        x = nn.Dense(256)(x)
+        x = nn.relu(x)
         num_actions = 43
         x = nn.Dense(num_actions)(x)
         return x
 
+def make_train(config):
+    env = make_craftax_env_from_name(config["ENV_NAME"], not config["USE_OPTIMISTIC_RESETS"])
+    env_params = env.default_params
+    env = LogWrapper(env)
+    if config["USE_OPTIMISTIC_RESETS"]:
+        env = OptimisticResetVecEnvWrapper(
+            env,
+            num_envs=config["NUM_ENVS"],
+            reset_ratio=min(config["OPTIMISTIC_RESET_RATIO"], config["NUM_ENVS"]),
+        )
+    else:
+        env = AutoResetEnvWrapper(env)
+        env = BatchEnvWrapper(env, num_envs=config["NUM_ENVS"])
 
-def make_greedy_action_fn(q_network):
-    @jax.jit
-    def greedy_action(params, state):
-        state = state[None, ...]
-        q_values = q_network.apply(params, state)
-        return jnp.argmax(q_values[0]).astype(jnp.int32)
+    config["NUM_EPOCHS"] = config["TOTAL_TIMESTEPS"] // config["NUM_STEPS"]
 
-    return greedy_action
+    def train(rng):
+        q_net = QNetwork()
 
-def make_training_step(q_network, optimiser):
-    @jax.jit
-    def train_step(
-        params,
-        target_params,
-        opt_state,
-        state_batch,
-        action_batch,
-        reward_batch,
-        next_state_batch,
-        done_batch,
-        gamma,
-    ):
-        def loss_fn(params):
-            q = q_network.apply(params, state_batch)
-            q_sa = jnp.take_along_axis(q, action_batch[:, None], axis=1).squeeze()
+        rng, q_key, t_key = jax.random.split(rng, 3)
+        init = jnp.zeros((1, *env.observation_space(env_params).shape))
+        q_params = q_net.init(q_key, init)
 
-            q_target = q_network.apply(target_params, next_state_batch)
+        rb = ReplayBuffer.create(
+            capacity=config["BUFFER_CAPACITY"],
+            batch_size=config["BATCH_SIZE"],
+            warmup=config["WARMUP"],
+            state_shape=env.observation_space(env_params).shape,
+            action_shape=(),
+            action_dtype=jnp.int32,
+        )
 
-            td_errors = reward_batch + (gamma * (1 - done_batch) * jnp.max(q_target, axis=1)) - q_sa
-            loss = jnp.mean(jnp.square(td_errors))
-            return loss
+        tx = optax.chain(
+            optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
+            optax.adam(config["LR"], eps=1e-5),
+        )
 
-        loss, grad = jax.value_and_grad(loss_fn)(params)
-        updates, new_opt_state = optimiser.update(grad, opt_state, params)
-        new_params = optax.apply_updates(params, updates)
-        return new_params, new_opt_state, loss
-    return train_step
+        # change t.
+        train_state = TrainState.create(
+            apply_fn=q_net.apply,
+            params=q_params,
+            tx=tx,
+        )
+
+        target_params = train_state.params
+
+        rng, _rng = jax.random.split(rng)
+        obs, env_state = env.reset(_rng, env_params)
+        def train_loop(run_state, _):
+            train_state, target_params, rb, obs, env_state, rng = run_state
+            def collect_transitions(carry, _):
+                train_state, rb, obs, env_state, rng = carry
+                action_logits = q_net.apply(train_state.params, obs)
+
+                rng, eps_key, action_key = jax.random.split(rng, 3)
+
+                random_values = jax.random.uniform(
+                    eps_key,
+                    shape=(config["NUM_ENVS"],),
+                )
+
+                random_actions = jax.random.randint(
+                    action_key,
+                    shape=(config["NUM_ENVS"],),
+                    minval=0,
+                    maxval=env.action_space(env_params).n,
+                )
+
+                greedy_actions = jnp.argmax(action_logits, axis=-1)
+
+                action = jnp.where(
+                    random_values < config["EPSILON"],
+                    random_actions,
+                    greedy_actions,
+                )
+
+                rng, _rng = jax.random.split(rng)
+                next_obs, next_env_state, reward, done, info = env.step(
+                    _rng,
+                    env_state,
+                    action,
+                    env_params)
+
+                transition = Transition(obs, action, reward, next_obs, done)
+                rb = rb.add_batch(transition)
+
+                rng, _rng = jax.random.split(rng)
+                next_carry  = train_state, rb, next_obs, next_env_state, _rng
+                return next_carry, _
+
+            rng, _rng = jax.random.split(rng)
+            initial_carry = train_state, rb, obs, env_state, _rng
+            rollout_state, rollout = jax.lax.scan(collect_transitions,
+                                                  initial_carry,
+                                                  xs=None,
+                                                  length=config["NUM_STEPS"])
+
+            next_train_state, rb, next_obs, next_env_state, rng = rollout_state
+
+            def update(carry, _):
+                def loss_fn(params, target_params, transition):
+                    q_values = q_net.apply(params,
+                        transition.state
+                    )
+
+                    q_selected = q_values[
+                        jnp.arange(q_values.shape[0]), transition.action,
+                    ]
+
+                    next_q_values = q_net.apply(target_params,
+                        transition.next_state,
+                    )
+
+                    target = (
+                            transition.reward
+                            + config["GAMMA"]
+                            * (1 - transition.done)
+                            * jnp.max(next_q_values, axis=-1)
+                    )
+
+                    target = jax.lax.stop_gradient(target)
+
+                    return jnp.mean((q_selected - target) ** 2)
+
+                train_state, target_params, rng = carry
+                rng, _rng = jax.random.split(rng)
+
+                transition_batch = rb.sample(_rng)
+
+                loss, grads = jax.value_and_grad(loss_fn)(
+                    train_state.params,
+                    target_params,
+                    transition_batch,
+                )
+
+                train_state = train_state.apply_gradients(grads=grads)
+                return (train_state, target_params, rng), _
+
+            rng, _rng = jax.random.split(rng)
+
+            ready = rb.size >= max(config["WARMUP"], config["BATCH_SIZE"])
+
+            def do_updates(carry):
+                train_state, target_params, rng = carry
+
+                (train_state, target_params, rng), losses = jax.lax.scan(
+                    update,
+                    (train_state, target_params, rng),
+                    xs=None,
+                    length=config["NUM_UPDATE_STEPS"],
+                )
+
+                return train_state, target_params, rng
+
+            def skip_updates(carry):
+                return carry
+
+            train_state, target_params, rng = jax.lax.cond(
+                ready,
+                do_updates,
+                skip_updates,
+                operand=(train_state, target_params, _rng),
+            )
+
+            target_params = jax.tree.map(
+                lambda target, online:
+                (1 - config["TAU"]) * target + config["TAU"] * online,
+                target_params,
+                train_state.params,
+            )
+            run_state = train_state, target_params, rb, next_obs, next_env_state, rng
+            return run_state, _
 
 
-class DQN:
-    def __init__(self, q_network, optimiser, replay_buffer, gamma=0.99, epsilon = 0.8, decay = 0.05, decay_steps=5000):
-        self.step = 0
-        self.target_update_freq = 75
-
-        self.q_network = q_network
-        self.greedy_action_jit = make_greedy_action_fn(self.q_network)
-
-        self.replay_buffer = replay_buffer
-        self.gamma = gamma
-        self.epsilon = epsilon
-        self.decay = decay
-        self.decay_steps = decay_steps
-
-        init_dummy = np.zeros((self.replay_buffer.batch_size, *self.replay_buffer.state_shape))
-        key = jax.random.PRNGKey(0)
-        q_key, t_key = jax.random.split(key, 2)
-        self.params = self.q_network.init(q_key, init_dummy)
-        self.t_params = self.q_network.init(t_key, init_dummy)
-
-        self.optimiser = optimiser
-        self.opt_state = self.optimiser.init(self.params)
-
-        self.training_step = make_training_step(self.q_network, self.optimiser)
-
-    def choose_action(self, state, env_params, env, policy_key):
-        key, eps_key = jax.random.split(policy_key)
-        random_value = jax.random.uniform(eps_key)
-
-        if random_value < self.epsilon:
-            action = env.action_space(env_params).sample(policy_key)
-            action = jnp.asarray(action, dtype=jnp.int32)
-        else:
-            action = self.greedy_action_jit(self.params, state)
-        return action
-
-    def choose_action_basic(self, state, env, policy_key):
-        key, eps_key, eps_key_2 = jax.random.split(policy_key, 3)
-        random_value = jax.random.uniform(eps_key)
-
-        if random_value < self.epsilon:
-            rand = jax.random.uniform(eps_key_2)
-            if rand < 0.5:
-                action = 0
-            else:
-                action = 1
-        else:
-            action = self.greedy_action_jit(self.params, state)
-        return action, key
-
-    def learn(self):
-        transitions = self.replay_buffer.sample_traj()
-        self.params, self.opt_state, loss = self.training_step(self.params, self.t_params, self.opt_state, *transitions, self.gamma)
-
-        self.step += 1
-
-        self.epsilon = self.epsilon - ((self.epsilon - self.decay) / self.decay_steps)
-
-        if self.step % self.target_update_freq == 0:
-            self.t_params = self.params
-
-        return loss
+        run_state = train_state, target_params, rb, obs, env_state, rng
+        run_state, _ = jax.lax.scan(train_loop, run_state, xs=None, length=config["NUM_EPOCHS"])
+        return run_state
+    return train

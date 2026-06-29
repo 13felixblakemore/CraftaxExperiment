@@ -23,9 +23,7 @@ from craftax.craftax.renderer import render_craftax_pixels
 from craftax.craftax_env import make_craftax_env_from_name
 from flax import linen as nn
 from flax.training.train_state import TrainState
-import configs
 from logz.batch_logging import create_log_dict, batch_log
-from test_environment import ChainEnv
 from typing import NamedTuple, Any
 
 from wrappers import LogWrapper, OptimisticResetVecEnvWrapper, AutoResetEnvWrapper, BatchEnvWrapper

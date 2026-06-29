@@ -108,6 +108,7 @@ def make_train(config):
         # choose w according to Q_w(obs)
         q_w, b, action_logits = network.apply(train_state.params, obs)
 
+        # change this
         def epsilon_greedy_options(rng, q_w, epsilon):
             batch_size = q_w.shape[0]
 

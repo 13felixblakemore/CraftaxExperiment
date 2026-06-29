@@ -10,6 +10,7 @@ from orbax.checkpoint import CheckpointManagerOptions, CheckpointManager
 from orbax.checkpoint._src.checkpointers.pytree_checkpointer import PyTreeCheckpointer
 
 import MOC
+import dqn
 import option_critic
 import ppo_shared
 import wandb
@@ -38,6 +39,8 @@ def run(config):
         make_train = option_critic.make_train
     elif config["ALGORITHM"] == "MOC":
         make_train = MOC.make_train
+    elif config["ALGORITHM"] == "DQN":
+        make_train = dqn.make_train
     else:
         raise ValueError("Unsupported algorithm.")
 
@@ -98,6 +101,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--anneal_lr", action=argparse.BooleanOptionalAction, default=True
     )
+    # DQN
+    parser.add_argument("--num_update_steps", type=int, default=8)
+    parser.add_argument("--num_epochs", type=int, default=100)
+    parser.add_argument("--warmup", type=int, default=4)
+    parser.add_argument("--buffer_capacity", type=int, default=int(100))
+    parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--epsilon", type=float, default=0.2)
+    parser.add_argument("--tau", type=float, default=0.005)
 
     # Option Critic
     parser.add_argument("--num_options", type=int, default=4)
@@ -110,7 +121,7 @@ if __name__ == "__main__":
     parser.add_argument("--jit", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--seed", type=int)
     parser.add_argument(
-        "--use_wandb", action=argparse.BooleanOptionalAction, default=True
+        "--use_wandb", action=argparse.BooleanOptionalAction, default=False
     )
     parser.add_argument("--save_policy", action="store_true")
     parser.add_argument("--num_repeats", type=int, default=1)
