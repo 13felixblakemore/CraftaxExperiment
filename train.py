@@ -106,7 +106,6 @@ if __name__ == "__main__":
     parser.add_argument("--warmup", type=int, default=4)
     parser.add_argument("--buffer_capacity", type=int, default=100)
     parser.add_argument("--batch_size", type=int, default=32)
-    parser.add_argument("--epsilon", type=float, default=0.2)
     parser.add_argument("--epsilon_start", type=float, default=1.0)
     parser.add_argument("--epsilon_end", type=float, default=0.1)
     parser.add_argument("--epsilon_steps", type=int, default=1000)

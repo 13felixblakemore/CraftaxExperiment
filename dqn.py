@@ -249,7 +249,7 @@ def make_train(config):
                 greedy_actions = jnp.argmax(action_logits, axis=-1)
 
                 action = jnp.where(
-                    random_values < config["EPSILON"],
+                    random_values < epsilon,
                     random_actions,
                     greedy_actions,
                 )
@@ -360,7 +360,7 @@ def make_train(config):
 
             env_steps = update_idx * config["NUM_STEPS"] * config["NUM_ENVS"]
 
-            config["EPSILON"] = jnp.where(
+            epsilon = jnp.where(
                 rb.size < config["WARMUP"],
                 1.0,
                 epsilon_schedule(env_steps),
@@ -387,6 +387,7 @@ def make_train(config):
                         training_ready,
                         completed_episodes,
                         update_step,
+                        epsilon
                 ):
                     to_log = create_log_dict(metric, config)
 
@@ -395,7 +396,7 @@ def make_train(config):
                         "dqn/buffer_size": int(buffer_size),
                         "dqn/training_started": int(training_ready),
                         "dqn/completed_episodes": int(completed_episodes),
-                        "dqn/epsilon": float(config["EPSILON"]),
+                        "dqn/epsilon": float(epsilon),
                     })
 
                     batch_log(
@@ -412,6 +413,7 @@ def make_train(config):
                     ready,
                     num_completed_episodes,
                     update_idx,
+                    epsilon
                 )
 
             run_state = train_state, target_params, rb, next_obs, next_env_state, rng, update_idx+1
