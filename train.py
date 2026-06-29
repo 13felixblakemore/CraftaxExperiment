@@ -104,7 +104,7 @@ if __name__ == "__main__":
     # DQN
     parser.add_argument("--num_update_steps", type=int, default=8)
     parser.add_argument("--warmup", type=int, default=4)
-    parser.add_argument("--buffer_capacity", type=int, default=int(100))
+    parser.add_argument("--buffer_capacity", type=int, default=100)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--epsilon", type=float, default=0.2)
     parser.add_argument("--tau", type=float, default=0.005)
