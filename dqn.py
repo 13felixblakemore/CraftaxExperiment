@@ -46,7 +46,6 @@ class ReplayBuffer:
         action_dtype=jnp.float32,
         state_dtype=jnp.float32,
     ) -> ReplayBuffer:
-        """Allocate an empty replay buffer."""
 
         return cls(
             states=jnp.zeros(
@@ -77,14 +76,7 @@ class ReplayBuffer:
         )
 
     def add_batch(self, batch: Transition) -> ReplayBuffer:
-        """
-        Add B transitions.
 
-        batch.state has shape:
-            (B, *state_shape)
-
-        Assumes B <= capacity.
-        """
         num_added = batch.state.shape[0]
 
         if num_added > self.capacity:
@@ -117,7 +109,6 @@ class ReplayBuffer:
         )
 
     def add(self, transition: Transition) -> ReplayBuffer:
-        """Add a single transition."""
 
         batch = jax.tree.map(
             lambda x: jnp.expand_dims(x, axis=0),
@@ -130,12 +121,6 @@ class ReplayBuffer:
         self,
         rng: jax.Array,
     ) -> Transition:
-        """
-        Sample with replacement.
-
-        Only call once size > 0, and preferably once
-        size >= batch_size.
-        """
         indices = jax.random.randint(
             rng,
             shape=(self.batch_size,),
@@ -369,7 +354,6 @@ def make_train(config):
             episode_mask = rollout_info["returned_episode"].astype(jnp.float32)
             num_completed_episodes = episode_mask.sum()
 
-            # Avoid division by zero when no environment finished during this rollout.
             denominator = jnp.maximum(num_completed_episodes, 1.0)
 
             episode_metric = jax.tree.map(
@@ -394,6 +378,7 @@ def make_train(config):
                     to_log = create_log_dict(metric, config)
 
                     to_log.update({
+                        "global_step": int(global_step),
                         "losses/dqn_loss": float(dqn_loss),
                         "dqn/buffer_size": int(buffer_size),
                         "dqn/training_started": int(training_ready),

@@ -20,7 +20,7 @@ def run(config):
     config = {k.upper(): v for k, v in config.__dict__.items()}
 
     if config["USE_WANDB"]:
-        wandb.init(
+        run = wandb.init(
             project=config["WANDB_PROJECT"],
             entity=config["WANDB_ENTITY"],
             config=config,
@@ -29,6 +29,9 @@ def run(config):
             + str(int(config["TOTAL_TIMESTEPS"] // 1e6))
             + "M",
         )
+        run.define_metric("global_step")
+        run.define_metric("*", step_metric="global_step")
+
 
     rng = jax.random.PRNGKey(config["SEED"])
     rngs = jax.random.split(rng, config["NUM_REPEATS"])
