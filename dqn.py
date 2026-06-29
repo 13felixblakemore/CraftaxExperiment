@@ -213,6 +213,19 @@ def make_train(config):
 
         rng, _rng = jax.random.split(rng)
         obs, env_state = env.reset(_rng, env_params)
+
+        def epsilon_schedule(env_steps):
+            fraction = jnp.clip(
+                env_steps / config["EPSILON_STEPS"],
+                0.0,
+                1.0,
+            )
+            return (
+                    config["EPSILON_START"]
+                    + fraction
+                    * (config["EPSILON_END"] - config["EPSILON_START"])
+            )
+
         def train_loop(run_state, _):
             train_state, target_params, rb, obs, env_state, rng, update_idx = run_state
             def collect_transitions(carry, _):
@@ -343,6 +356,14 @@ def make_train(config):
                 do_updates,
                 skip_updates,
                 operand=(next_train_state, target_params, _rng),
+            )
+
+            env_steps = update_idx * config["NUM_STEPS"] * config["NUM_ENVS"]
+
+            config["EPSILON"] = jnp.where(
+                rb.size < config["WARMUP"],
+                1.0,
+                epsilon_schedule(env_steps),
             )
 
             episode_mask = rollout_info["returned_episode"].astype(jnp.float32)
