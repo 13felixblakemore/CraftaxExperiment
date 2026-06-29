@@ -379,6 +379,8 @@ def make_train(config):
                 rollout_info,
             )
 
+            global_step = update_idx * config["NUM_ENVS"] * config["NUM_STEPS"]
+
             if config["DEBUG"] and config["USE_WANDB"]:
                 def callback(
                         metric,
@@ -386,7 +388,7 @@ def make_train(config):
                         buffer_size,
                         training_ready,
                         completed_episodes,
-                        update_step,
+                        global_step,
                         epsilon
                 ):
                     to_log = create_log_dict(metric, config)
@@ -400,7 +402,7 @@ def make_train(config):
                     })
 
                     batch_log(
-                        update_step,
+                        global_step,
                         to_log,
                         config,
                     )
@@ -412,7 +414,7 @@ def make_train(config):
                     rb.size,
                     ready,
                     num_completed_episodes,
-                    update_idx,
+                    global_step,
                     epsilon
                 )
 
