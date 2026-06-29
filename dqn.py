@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Sequence
+from typing import Sequence, Optional
 import jax
 import numpy as np
 import jax.numpy as jnp
@@ -203,7 +203,6 @@ def make_train(config):
             optax.adam(config["LR"], eps=1e-5),
         )
 
-        # change t.
         train_state = TrainState.create(
             apply_fn=q_net.apply,
             params=q_params,
@@ -217,7 +216,7 @@ def make_train(config):
         def train_loop(run_state, _):
             train_state, target_params, rb, obs, env_state, rng, update_idx = run_state
             def collect_transitions(carry, _):
-                train_state, rb, obs, env_state, rng = carry
+                train_state, obs, env_state, rng = carry
                 action_logits = q_net.apply(train_state.params, obs)
 
                 rng, eps_key, action_key = jax.random.split(rng, 3)
@@ -250,20 +249,21 @@ def make_train(config):
                     env_params)
 
                 transition = Transition(obs, action, reward, next_obs, done)
-                rb = rb.add_batch(transition)
 
                 rng, _rng = jax.random.split(rng)
-                next_carry  = train_state, rb, next_obs, next_env_state, _rng
-                return next_carry, info
+                next_carry  = train_state, next_obs, next_env_state, _rng
+                return next_carry, (transition, info)
 
             rng, _rng = jax.random.split(rng)
-            initial_carry = train_state, rb, obs, env_state, _rng
-            rollout_state, rollout_info = jax.lax.scan(collect_transitions,
+            initial_carry = train_state, obs, env_state, _rng
+            rollout_state, (transition, rollout_info) = jax.lax.scan(collect_transitions,
                                                   initial_carry,
                                                   xs=None,
                                                   length=config["NUM_STEPS"])
 
-            next_train_state, rb, next_obs, next_env_state, rng = rollout_state
+            rb = rb.add_batch(transition)
+
+            next_train_state, next_obs, next_env_state, rng = rollout_state
 
             def update(carry, _):
                 def loss_fn(params, target_params, transition):
@@ -301,6 +301,13 @@ def make_train(config):
                     transition_batch,
                 )
 
+                target_params = jax.tree.map(
+                    lambda target, online:
+                    (1 - config["TAU"]) * target + config["TAU"] * online,
+                    target_params,
+                    train_state.params,
+                )
+
                 train_state = train_state.apply_gradients(grads=grads)
                 return (train_state, target_params, rng), loss
 
@@ -332,13 +339,6 @@ def make_train(config):
                 do_updates,
                 skip_updates,
                 operand=(next_train_state, target_params, _rng),
-            )
-
-            target_params = jax.tree.map(
-                lambda target, online:
-                (1 - config["TAU"]) * target + config["TAU"] * online,
-                target_params,
-                train_state.params,
             )
 
             episode_mask = rollout_info["returned_episode"].astype(jnp.float32)
