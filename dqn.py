@@ -228,6 +228,14 @@ def make_train(config):
 
         def train_loop(run_state, _):
             train_state, target_params, rb, obs, env_state, rng, update_idx = run_state
+
+            env_steps = update_idx * config["NUM_STEPS"] * config["NUM_ENVS"]
+            epsilon = jnp.where(
+                rb.size < config["WARMUP"],
+                1.0,
+                epsilon_schedule(env_steps),
+            )
+
             def collect_transitions(carry, _):
                 train_state, obs, env_state, rng = carry
                 action_logits = q_net.apply(train_state.params, obs)
@@ -356,14 +364,6 @@ def make_train(config):
                 do_updates,
                 skip_updates,
                 operand=(next_train_state, target_params, _rng),
-            )
-
-            env_steps = update_idx * config["NUM_STEPS"] * config["NUM_ENVS"]
-
-            epsilon = jnp.where(
-                rb.size < config["WARMUP"],
-                1.0,
-                epsilon_schedule(env_steps),
             )
 
             episode_mask = rollout_info["returned_episode"].astype(jnp.float32)
