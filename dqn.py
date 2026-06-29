@@ -7,7 +7,7 @@ import optax
 from craftax.craftax_env import make_craftax_env_from_name
 from flax import linen as nn, struct
 from flax.training.train_state import TrainState
-
+from logz.batch_logging import create_log_dict, batch_log
 from wrappers import LogWrapper, AutoResetEnvWrapper, OptimisticResetVecEnvWrapper, BatchEnvWrapper
 
 
@@ -180,7 +180,7 @@ def make_train(config):
         env = AutoResetEnvWrapper(env)
         env = BatchEnvWrapper(env, num_envs=config["NUM_ENVS"])
 
-    config["NUM_EPOCHS"] = config["TOTAL_TIMESTEPS"] // config["NUM_STEPS"]
+    config["NUM_UPDATES"] = config["TOTAL_TIMESTEPS"] // (config["NUM_STEPS"]*config["NUM_ENVS"])
 
     def train(rng):
         q_net = QNetwork()
@@ -215,7 +215,7 @@ def make_train(config):
         rng, _rng = jax.random.split(rng)
         obs, env_state = env.reset(_rng, env_params)
         def train_loop(run_state, _):
-            train_state, target_params, rb, obs, env_state, rng = run_state
+            train_state, target_params, rb, obs, env_state, rng, update_idx = run_state
             def collect_transitions(carry, _):
                 train_state, rb, obs, env_state, rng = carry
                 action_logits = q_net.apply(train_state.params, obs)
@@ -254,11 +254,11 @@ def make_train(config):
 
                 rng, _rng = jax.random.split(rng)
                 next_carry  = train_state, rb, next_obs, next_env_state, _rng
-                return next_carry, _
+                return next_carry, info
 
             rng, _rng = jax.random.split(rng)
             initial_carry = train_state, rb, obs, env_state, _rng
-            rollout_state, rollout = jax.lax.scan(collect_transitions,
+            rollout_state, rollout_info = jax.lax.scan(collect_transitions,
                                                   initial_carry,
                                                   xs=None,
                                                   length=config["NUM_STEPS"])
@@ -302,7 +302,7 @@ def make_train(config):
                 )
 
                 train_state = train_state.apply_gradients(grads=grads)
-                return (train_state, target_params, rng), _
+                return (train_state, target_params, rng), loss
 
             rng, _rng = jax.random.split(rng)
 
@@ -318,16 +318,20 @@ def make_train(config):
                     length=config["NUM_UPDATE_STEPS"],
                 )
 
-                return train_state, target_params, rng
+                mean_loss = losses.mean()
+
+                return train_state, target_params, rng, mean_loss
 
             def skip_updates(carry):
-                return carry
+                train_state, target_params, rng = carry
+                mean_loss = jnp.array(jnp.nan, dtype=jnp.float32)
+                return train_state, target_params, rng, mean_loss
 
-            train_state, target_params, rng = jax.lax.cond(
+            train_state, target_params, rng, mean_loss = jax.lax.cond(
                 ready,
                 do_updates,
                 skip_updates,
-                operand=(train_state, target_params, _rng),
+                operand=(next_train_state, target_params, _rng),
             )
 
             target_params = jax.tree.map(
@@ -336,11 +340,59 @@ def make_train(config):
                 target_params,
                 train_state.params,
             )
-            run_state = train_state, target_params, rb, next_obs, next_env_state, rng
-            return run_state, _
 
+            episode_mask = rollout_info["returned_episode"].astype(jnp.float32)
+            num_completed_episodes = episode_mask.sum()
 
-        run_state = train_state, target_params, rb, obs, env_state, rng
-        run_state, _ = jax.lax.scan(train_loop, run_state, xs=None, length=config["NUM_EPOCHS"])
+            # Avoid division by zero when no environment finished during this rollout.
+            denominator = jnp.maximum(num_completed_episodes, 1.0)
+
+            episode_metric = jax.tree.map(
+                lambda x: (
+                                  x * episode_mask
+                          ).sum() / denominator,
+                rollout_info,
+            )
+
+            if config["DEBUG"] and config["USE_WANDB"]:
+                def callback(
+                        metric,
+                        dqn_loss,
+                        buffer_size,
+                        training_ready,
+                        completed_episodes,
+                        update_step,
+                ):
+                    to_log = create_log_dict(metric, config)
+
+                    to_log.update({
+                        "losses/dqn_loss": float(dqn_loss),
+                        "dqn/buffer_size": int(buffer_size),
+                        "dqn/training_started": int(training_ready),
+                        "dqn/completed_episodes": int(completed_episodes),
+                        "dqn/epsilon": float(config["EPSILON"]),
+                    })
+
+                    batch_log(
+                        update_step,
+                        to_log,
+                        config,
+                    )
+
+                jax.debug.callback(
+                    callback,
+                    episode_metric,
+                    mean_loss,
+                    rb.size,
+                    ready,
+                    num_completed_episodes,
+                    update_idx,
+                )
+
+            run_state = train_state, target_params, rb, next_obs, next_env_state, rng, update_idx+1
+            return run_state, episode_metric
+
+        run_state = train_state, target_params, rb, obs, env_state, rng, jnp.array(0, dtype=jnp.int32)
+        run_state, _ = jax.lax.scan(train_loop, run_state, xs=None, length=config["NUM_UPDATES"])
         return run_state
     return train

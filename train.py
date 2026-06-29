@@ -103,7 +103,6 @@ if __name__ == "__main__":
     )
     # DQN
     parser.add_argument("--num_update_steps", type=int, default=8)
-    parser.add_argument("--num_epochs", type=int, default=100)
     parser.add_argument("--warmup", type=int, default=4)
     parser.add_argument("--buffer_capacity", type=int, default=int(100))
     parser.add_argument("--batch_size", type=int, default=32)
@@ -121,7 +120,7 @@ if __name__ == "__main__":
     parser.add_argument("--jit", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--seed", type=int)
     parser.add_argument(
-        "--use_wandb", action=argparse.BooleanOptionalAction, default=False
+        "--use_wandb", action=argparse.BooleanOptionalAction, default=True
     )
     parser.add_argument("--save_policy", action="store_true")
     parser.add_argument("--num_repeats", type=int, default=1)
