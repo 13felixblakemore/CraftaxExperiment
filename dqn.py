@@ -261,7 +261,11 @@ def make_train(config):
                                                   xs=None,
                                                   length=config["NUM_STEPS"])
 
-            rb = rb.add_batch(transition)
+            flat_transition = jax.tree.map(
+                lambda x: x.reshape((-1, *x.shape[2:])),
+                transition,
+            )
+            rb = rb.add_batch(flat_transition)
 
             next_train_state, next_obs, next_env_state, rng = rollout_state
 
