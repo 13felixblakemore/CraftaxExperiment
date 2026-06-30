@@ -291,17 +291,23 @@ def make_train(config):
 
             rng = update_state[-1]
 
+
+            global_step = update_idx * config["NUM_ENVS"] * config["NUM_STEPS"]
+
             if config["DEBUG"] and config["USE_WANDB"]:
 
-                def callback(metric, update_step):
+                def callback(metric, global_step):
                     to_log = create_log_dict(metric, config)
-                    batch_log(update_step, to_log, config)
-
+                    to_log.update({
+                        "global_step": global_step,
+                    })
+                    batch_log(global_step, to_log, config)
+                """
                 jax.debug.callback(
                     callback,
                     metric,
-                    update_idx,
-                )
+                    global_step,
+                )"""
 
             runner_state = (
                 train_state,

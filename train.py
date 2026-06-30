@@ -9,6 +9,7 @@ from flax.training import orbax_utils
 from orbax.checkpoint import CheckpointManagerOptions, CheckpointManager
 from orbax.checkpoint._src.checkpointers.pytree_checkpointer import PyTreeCheckpointer
 
+import SAC
 import MOC
 import dqn
 import option_critic
@@ -44,6 +45,8 @@ def run(config):
         make_train = MOC.make_train
     elif config["ALGORITHM"] == "DQN":
         make_train = dqn.make_train
+    elif config["ALGORITHM"] == "SAC":
+        make_train = SAC.make_train
     else:
         raise ValueError("Unsupported algorithm.")
 
@@ -85,10 +88,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--num_envs",
         type=int,
-        default=1024,
+        default=512,
     )
     parser.add_argument(
-        "--total_timesteps", type=lambda x: int(float(x)), default=1e9
+        "--total_timesteps", type=lambda x: int(float(x)), default=1e8
     )
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--num_steps", type=int, default=64)
@@ -105,14 +108,16 @@ if __name__ == "__main__":
         "--anneal_lr", action=argparse.BooleanOptionalAction, default=True
     )
     # DQN
-    parser.add_argument("--num_update_steps", type=int, default=8)
-    parser.add_argument("--warmup", type=int, default=4)
-    parser.add_argument("--buffer_capacity", type=int, default=100)
+    parser.add_argument("--num_update_steps", type=int, default=16)
+    parser.add_argument("--warmup", type=int, default=2000)
+    parser.add_argument("--buffer_capacity", type=int, default=100_000)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--epsilon_start", type=float, default=1.0)
     parser.add_argument("--epsilon_end", type=float, default=0.1)
-    parser.add_argument("--epsilon_steps", type=int, default=1000)
+    parser.add_argument("--epsilon_steps", type=int, default=100_000_000)
     parser.add_argument("--tau", type=float, default=0.005)
+    # SAC
+    parser.add_argument("--ent_temp", type=float, default=1.0)
 
     # Option Critic
     parser.add_argument("--num_options", type=int, default=4)
