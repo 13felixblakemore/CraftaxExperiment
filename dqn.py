@@ -9,7 +9,7 @@ from flax import linen as nn, struct
 from flax.training.train_state import TrainState
 from logz.batch_logging import create_log_dict, batch_log
 from wrappers import LogWrapper, AutoResetEnvWrapper, OptimisticResetVecEnvWrapper, BatchEnvWrapper
-
+import gymnax
 
 @struct.dataclass
 class Transition:
@@ -141,19 +141,23 @@ class ReplayBuffer:
         return self.size >= self.batch_size and self.size >= self.warmup
 
 class QNetwork(nn.Module):
+    num_actions: int
+
     @nn.compact
     def __call__(self, x):
         x = nn.Dense(256)(x)
         x = nn.relu(x)
         x = nn.Dense(256)(x)
         x = nn.relu(x)
-        num_actions = 43
-        x = nn.Dense(num_actions)(x)
+        x = nn.Dense(self.num_actions)(x)
         return x
 
 def make_train(config):
+
+    # Create environment
     env = make_craftax_env_from_name(config["ENV_NAME"], not config["USE_OPTIMISTIC_RESETS"])
     env_params = env.default_params
+    env, env_params = gymnax.make("CartPole-v1")
     env = LogWrapper(env)
     if config["USE_OPTIMISTIC_RESETS"]:
         env = OptimisticResetVecEnvWrapper(
@@ -168,9 +172,13 @@ def make_train(config):
     config["NUM_UPDATES"] = config["TOTAL_TIMESTEPS"] // (config["NUM_STEPS"]*config["NUM_ENVS"])
 
     def train(rng):
-        q_net = QNetwork()
+        # Initialize q_net, target, replay buffer, and optimiser
 
-        rng, q_key, t_key = jax.random.split(rng, 3)
+        num_actions = env.action_space(env_params).n
+        q_net = QNetwork(num_actions)
+
+
+        rng, q_key, d_key = jax.random.split(rng, 3)
         init = jnp.zeros((1, *env.observation_space(env_params).shape))
         q_params = q_net.init(q_key, init)
 
@@ -183,10 +191,23 @@ def make_train(config):
             action_dtype=jnp.int32,
         )
 
-        tx = optax.chain(
-            optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
-            optax.adam(config["LR"], eps=1e-5),
-        )
+        def linear_schedule(count):
+            frac = (
+                1.0
+                - (count // (config["TOTAL_TIMESTEPS"]))
+            )
+            return config["LR"] * frac
+        
+        if config["ANNEAL_LR"]:
+            tx = optax.chain(
+                optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
+                optax.adam(learning_rate=linear_schedule, eps=1e-5),
+            )
+        else:
+            tx = optax.chain(
+                optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
+                optax.adam(config["LR"], eps=1e-5),
+            )
 
         train_state = TrainState.create(
             apply_fn=q_net.apply,
@@ -260,6 +281,7 @@ def make_train(config):
                 next_carry  = train_state, next_obs, next_env_state, _rng
                 return next_carry, (transition, info)
 
+            # Collect rollout NUM_ENVS * NUM_STEPS transitions
             rng, _rng = jax.random.split(rng)
             initial_carry = train_state, obs, env_state, _rng
             rollout_state, (transition, rollout_info) = jax.lax.scan(collect_transitions,
@@ -267,6 +289,7 @@ def make_train(config):
                                                   xs=None,
                                                   length=config["NUM_STEPS"])
 
+            # Add to replay buffer
             flat_transition = jax.tree.map(
                 lambda x: x.reshape((-1, *x.shape[2:])),
                 transition,
@@ -285,15 +308,23 @@ def make_train(config):
                         jnp.arange(q_values.shape[0]), transition.action,
                     ]
 
-                    next_q_values = q_net.apply(target_params,
+                    next_q_values = q_net.apply(params,
                         transition.next_state,
                     )
+
+                    target_q_values = q_net.apply(target_params,
+                        transition.next_state,
+                    )
+
+                    action = jnp.argmax(next_q_values, axis=-1)
+
+
 
                     target = (
                             transition.reward
                             + config["GAMMA"]
                             * (1 - transition.done)
-                            * jnp.max(next_q_values, axis=-1)
+                            * target_q_values[jnp.arange(target_q_values.shape[0]), action]
                     )
 
                     target = jax.lax.stop_gradient(target)
@@ -311,14 +342,16 @@ def make_train(config):
                     transition_batch,
                 )
 
+                train_state = train_state.apply_gradients(grads=grads)
+
+                # Polyak (?) update
                 target_params = jax.tree.map(
                     lambda target, online:
                     (1 - config["TAU"]) * target + config["TAU"] * online,
                     target_params,
                     train_state.params,
                 )
-
-                train_state = train_state.apply_gradients(grads=grads)
+                
                 return (train_state, target_params, rng), loss
 
             rng, _rng = jax.random.split(rng)
@@ -344,6 +377,7 @@ def make_train(config):
                 mean_loss = jnp.array(jnp.nan, dtype=jnp.float32)
                 return train_state, target_params, rng, mean_loss
 
+            # Do updates if the replay buffer is ready, otherwise skip
             train_state, target_params, rng, mean_loss = jax.lax.cond(
                 ready,
                 do_updates,
@@ -354,12 +388,12 @@ def make_train(config):
             episode_mask = rollout_info["returned_episode"].astype(jnp.float32)
             num_completed_episodes = episode_mask.sum()
 
-            denominator = jnp.maximum(num_completed_episodes, 1.0)
-
             episode_metric = jax.tree.map(
-                lambda x: (
-                                  x * episode_mask
-                          ).sum() / denominator,
+                lambda x: jnp.where(
+                    num_completed_episodes > 0,
+                    (x * episode_mask).sum() / num_completed_episodes,
+                    jnp.nan,
+                ),
                 rollout_info,
             )
 

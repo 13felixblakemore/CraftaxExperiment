@@ -2,6 +2,7 @@ import argparse
 import os
 import sys
 import time
+import gymnax
 
 import jax
 import numpy as np
@@ -91,10 +92,10 @@ if __name__ == "__main__":
         default=512,
     )
     parser.add_argument(
-        "--total_timesteps", type=lambda x: int(float(x)), default=1e8
+        "--total_timesteps", type=lambda x: int(float(x)), default=600_000
     )
-    parser.add_argument("--lr", type=float, default=2e-4)
-    parser.add_argument("--num_steps", type=int, default=64)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--num_steps", type=int, default=16)
     parser.add_argument("--update_epochs", type=int, default=4)
     parser.add_argument("--num_minibatches", type=int, default=8)
     parser.add_argument("--gamma", type=float, default=0.99)
@@ -108,16 +109,20 @@ if __name__ == "__main__":
         "--anneal_lr", action=argparse.BooleanOptionalAction, default=True
     )
     # DQN
-    parser.add_argument("--num_update_steps", type=int, default=16)
-    parser.add_argument("--warmup", type=int, default=2000)
-    parser.add_argument("--buffer_capacity", type=int, default=100_000)
-    parser.add_argument("--batch_size", type=int, default=32)
-    parser.add_argument("--epsilon_start", type=float, default=1.0)
-    parser.add_argument("--epsilon_end", type=float, default=0.1)
-    parser.add_argument("--epsilon_steps", type=int, default=100_000_000)
+    # Flashbax would allow larger replay buffer and larger batch size
+    # Prioritised replay
+    # Double, dueling, distributional, noisy nets, categorical, rainbow
+    # Could use n-step replay buffer
+    parser.add_argument("--num_update_steps", type=int, default=8)
+    parser.add_argument("--warmup", type=int, default=10_000)
+    parser.add_argument("--buffer_capacity", type=int, default=200_000)
+    parser.add_argument("--batch_size", type=int, default=512)
+    parser.add_argument("--epsilon_start", type=float, default=0.9)
+    parser.add_argument("--epsilon_end", type=float, default=0.01)
+    parser.add_argument("--epsilon_steps", type=int, default=350_000)
     parser.add_argument("--tau", type=float, default=0.005)
     # SAC
-    parser.add_argument("--ent_temp", type=float, default=1.0)
+    parser.add_argument("--ent_temp", type=float, default=0.2)
 
     # Option Critic
     parser.add_argument("--num_options", type=int, default=4)
@@ -134,11 +139,11 @@ if __name__ == "__main__":
     )
     parser.add_argument("--save_policy", action="store_true")
     parser.add_argument("--num_repeats", type=int, default=1)
-    parser.add_argument("--layer_size", type=int, default=512)
+    parser.add_argument("--layer_size", type=int, default=64)
     parser.add_argument("--wandb_project", type=str)
     parser.add_argument("--wandb_entity", type=str)
     parser.add_argument(
-        "--use_optimistic_resets", action=argparse.BooleanOptionalAction, default=True
+        "--use_optimistic_resets", action=argparse.BooleanOptionalAction, default=False
     )
     parser.add_argument("--optimistic_reset_ratio", type=int, default=16)
 

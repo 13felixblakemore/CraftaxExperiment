@@ -25,6 +25,7 @@ from flax import linen as nn
 from flax.training.train_state import TrainState
 from logz.batch_logging import create_log_dict, batch_log
 from typing import NamedTuple, Any
+import gymnax
 
 from wrappers import LogWrapper, OptimisticResetVecEnvWrapper, AutoResetEnvWrapper, BatchEnvWrapper
 
@@ -81,6 +82,7 @@ class ActorCritic(nn.Module):
 def make_train(config):
     env = make_craftax_env_from_name(config["ENV_NAME"], not config["USE_OPTIMISTIC_RESETS"])
     env_params = env.default_params
+    env, env_params = gymnax.make("CartPole-v1")
     env = LogWrapper(env)
     if config["USE_OPTIMISTIC_RESETS"]:
         env = OptimisticResetVecEnvWrapper(
