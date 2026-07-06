@@ -312,6 +312,12 @@ def make_train(config):
                         )
                     )
 
+                    """
+                    q_gap = (q_values.max(axis=-1) - q_values.min(axis=-1)).mean()
+                    q_std = q_values.std()
+                    max_action_prob = probs.max(axis=-1).mean()
+                    min_action_prob = probs.min(axis=-1).mean()"""
+
                     entropy = -jnp.sum(probs * log_probs, axis=-1)
                     expected_q = jnp.sum(probs * q_values, axis=-1)
 
