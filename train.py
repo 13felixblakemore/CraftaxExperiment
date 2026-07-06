@@ -95,7 +95,7 @@ if __name__ == "__main__":
         "--total_timesteps", type=lambda x: int(float(x)), default=1e6
     )
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--num_steps", type=int, default=16)
+    parser.add_argument("--num_steps", type=int, default=8)
     parser.add_argument("--update_epochs", type=int, default=4)
     parser.add_argument("--num_minibatches", type=int, default=8)
     parser.add_argument("--gamma", type=float, default=0.99)
@@ -116,15 +116,15 @@ if __name__ == "__main__":
     parser.add_argument("--num_update_steps", type=int, default=8)
     parser.add_argument("--warmup", type=int, default=2_000)
     parser.add_argument("--buffer_capacity", type=int, default=100_000)
-    parser.add_argument("--batch_size", type=int, default=512)
+    parser.add_argument("--batch_size", type=int, default=1024)
     parser.add_argument("--epsilon_start", type=float, default=0.9)
     parser.add_argument("--epsilon_end", type=float, default=0.01)
     parser.add_argument("--epsilon_steps", type=int, default=350_000)
     parser.add_argument("--tau", type=float, default=0.005)
     # SAC
-    parser.add_argument("--target_entropy", type=float, default=0.1)
-    parser.add_argument("--alpha_lr", type=float, default=3e-5)
-    parser.add_argument("--ent_temp", type=float, default=0.005)
+    parser.add_argument("--target_entropy", type=float, default=0.2)
+    parser.add_argument("--alpha_lr", type=float, default=3e-4)
+    parser.add_argument("--ent_temp", type=float, default=0.01)
 
     # Option Critic
     parser.add_argument("--num_options", type=int, default=4)
