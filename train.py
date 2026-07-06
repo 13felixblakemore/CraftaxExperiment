@@ -122,6 +122,8 @@ if __name__ == "__main__":
     parser.add_argument("--epsilon_steps", type=int, default=350_000)
     parser.add_argument("--tau", type=float, default=0.005)
     # SAC
+    parser.add_argument("--target_entropy", type=float, default=1.0)
+    parser.add_argument("--alpha_lr", type=float, defauly=3e-5)
     parser.add_argument("--ent_temp", type=float, default=0.2)
 
     # Option Critic
