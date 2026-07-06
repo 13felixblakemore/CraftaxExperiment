@@ -113,9 +113,9 @@ if __name__ == "__main__":
     # Prioritised replay
     # Double, dueling, distributional, noisy nets, categorical, rainbow
     # Could use n-step replay buffer
-    parser.add_argument("--num_update_steps", type=int, default=8)
-    parser.add_argument("--warmup", type=int, default=2_000)
-    parser.add_argument("--buffer_capacity", type=int, default=100_000)
+    parser.add_argument("--num_update_steps", type=int, default=16)
+    parser.add_argument("--warmup", type=int, default=5_000)
+    parser.add_argument("--buffer_capacity", type=int, default=200_000)
     parser.add_argument("--batch_size", type=int, default=1024)
     parser.add_argument("--epsilon_start", type=float, default=0.9)
     parser.add_argument("--epsilon_end", type=float, default=0.01)
