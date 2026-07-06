@@ -7,7 +7,7 @@ import jax.numpy as jnp
 import optax
 from flax import linen as nn
 from flax.training.train_state import TrainState
-
+from craftax.craftax_env import make_craftax_env_from_name
 from dqn import ReplayBuffer, Transition
 from logz.batch_logging import batch_log, create_log_dict
 from wrappers import AutoResetEnvWrapper, BatchEnvWrapper, LogWrapper, OptimisticResetVecEnvWrapper
@@ -42,9 +42,8 @@ class Critic(nn.Module):
 
 
 def make_train(config):
-
-    # Create environment
-    env, env_params = gymnax.make("CartPole-v1")
+    env = make_craftax_env_from_name(config["ENV_NAME"], not config["USE_OPTIMISTIC_RESETS"])
+    env_params = env.default_params
     env = LogWrapper(env)
     if config["USE_OPTIMISTIC_RESETS"]:
         env = OptimisticResetVecEnvWrapper(
