@@ -1,5 +1,6 @@
 # created by virtualenv automatically
 .venv/
+craftax_venv/
 wandb/
 episode_ppo.gif
 episode.gif
