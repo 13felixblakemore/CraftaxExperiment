@@ -32,6 +32,7 @@ class Transition(NamedTuple):
     b: jnp.ndarray
 
 
+# could have num_options actors and a separate critic?
 class OptionCritic(nn.Module):
     num_options: int
     action_dim: int
@@ -39,7 +40,7 @@ class OptionCritic(nn.Module):
 
     @nn.compact
     def __call__(self, s):
-        # s is shape (b, obs_shape)
+        # s is shape (num_envs, obs_shape)
         # maybe dense instead of conv for symbolic
 
         s = nn.Dense(self.dim)(s)
@@ -47,7 +48,7 @@ class OptionCritic(nn.Module):
         s = nn.Dense(self.dim)(s)
         s = nn.relu(s)
 
-        q_w = nn.Dense(self.num_options)(s) # q_w shape: (n) -- choose policy with epsilon greedy
+        q_w = nn.Dense(self.num_options)(s) # q_w shape: (num_envs, num_options)
         b = nn.Dense(self.num_options, bias_init=nn.initializers.constant(-2.0))(s) # b shape: (n) -- terminate the active option i with probability b_i (sigmoid)
         actions = nn.Dense(self.num_options * self.action_dim)(s) # actions shape: (n * action_dim)
         actions = actions.reshape((s.shape[0], self.num_options, self.action_dim)) # actions shape: (n, action_dim)
@@ -142,7 +143,7 @@ def make_train(config):
                 actions = policy.sample(seed=_rng)
                 log_probs = policy.log_prob(actions)
 
-                rng, _rng = jax.random.split(_rng)
+                rng, _rng = jax.random.split(rng)
                 next_obs, next_env_states, rewards, dones, infos = env.step(
                     _rng,
                     env_states,
@@ -155,10 +156,10 @@ def make_train(config):
 
                 b_next_o = b_next[jnp.arange(config["NUM_ENVS"]), option]
 
-                rng, _rng = jax.random.split(_rng)
+                rng, _rng = jax.random.split(rng)
                 terminate = dones | jax.random.bernoulli(_rng, b_next_o)
 
-                rng, _rng = jax.random.split(_rng)
+                rng, _rng = jax.random.split(rng)
                 new_option = epsilon_greedy_options(_rng, q_w, config["OPTION_POLICY_EPS"])
                 new_option = jnp.where((terminate == 1), new_option, option)
 
