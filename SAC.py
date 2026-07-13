@@ -1,4 +1,3 @@
-# Modern discrete SAC-style implementation with two critics and no value network.
 from __future__ import annotations
 
 import distrax
@@ -85,8 +84,6 @@ def make_train(config):
         )
 
         def linear_schedule(count):
-            # count is optimizer-step count, not env-step count.
-            # This is approximate, but better than integer-dividing by TOTAL_TIMESTEPS.
             frac = 1.0 - (count / max(config["NUM_UPDATES"] * config["NUM_UPDATE_STEPS"], 1))
             frac = jnp.clip(frac, 0.0, 1.0)
             return config["LR"] * frac
@@ -230,20 +227,14 @@ def make_train(config):
                 ):
                     log_alpha = alpha_params["log_alpha"]
 
-                    # Keep alpha positive. Do not optimise raw alpha directly.
                     alpha = jnp.exp(log_alpha)
                     alpha_sg = jax.lax.stop_gradient(alpha)
 
-                    # For Craftax with 43 actions, near-uniform entropy is too high.
-                    # log(43) ~= 3.76, so a target around 1.0 is usually more sensible.
                     target_entropy = jnp.asarray(
                         config.get("TARGET_ENTROPY", 1.0),
                         dtype=jnp.float32,
                     )
 
-                    # ------------------------------------------------------------
-                    # Critic loss
-                    # ------------------------------------------------------------
                     q1_values = q1_net.apply(q1_params, transition.state)
                     q2_values = q2_net.apply(q2_params, transition.state)
 
@@ -270,11 +261,6 @@ def make_train(config):
                     )
                     target_q = jnp.minimum(target_q1, target_q2)
 
-                    # Correct discrete SAC soft value:
-                    #
-                    # V(s') = sum_a pi(a|s') * [Q_target(s', a) - alpha * log pi(a|s')]
-                    #
-                    # Since log pi <= 0, this is equivalent to expected_q + alpha * entropy.
                     next_v = jnp.sum(
                         next_probs * (target_q - alpha_sg * next_log_probs),
                         axis=-1,
@@ -289,14 +275,10 @@ def make_train(config):
                     q1_loss = 0.5 * jnp.mean((q1_selected - target) ** 2)
                     q2_loss = 0.5 * jnp.mean((q2_selected - target) ** 2)
 
-                    # ------------------------------------------------------------
-                    # Actor loss
-                    # ------------------------------------------------------------
                     action_logits = actor_net.apply(actor_params, transition.state)
                     probs = jax.nn.softmax(action_logits, axis=-1)
                     log_probs = jax.nn.log_softmax(action_logits, axis=-1)
 
-                    # Stop critic gradients inside actor loss.
                     q_values = jax.lax.stop_gradient(
                         jnp.minimum(
                             q1_net.apply(q1_params, transition.state),
@@ -304,7 +286,6 @@ def make_train(config):
                         )
                     )
 
-                    # Equivalent to maximising E[Q + alpha * H].
                     actor_loss = jnp.mean(
                         jnp.sum(
                             probs * (alpha_sg * log_probs - q_values),
@@ -321,12 +302,6 @@ def make_train(config):
                     entropy = -jnp.sum(probs * log_probs, axis=-1)
                     expected_q = jnp.sum(probs * q_values, axis=-1)
 
-                    # ------------------------------------------------------------
-                    # Alpha loss
-                    # ------------------------------------------------------------
-                    # Behaviour:
-                    # entropy > target -> alpha decreases
-                    # entropy < target -> alpha increases
                     alpha_loss = jnp.mean(
                         alpha * jax.lax.stop_gradient(entropy - target_entropy)
                     )
