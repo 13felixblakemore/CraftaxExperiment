@@ -8,7 +8,6 @@ from craftax.craftax_env import make_craftax_env_from_name
 from logz.batch_logging import batch_log, create_log_dict
 from wrappers import AutoResetEnvWrapper, BatchEnvWrapper, LogWrapper, OptimisticResetVecEnvWrapper
 import flashbax as fbx
-from SAC import Actor, Critic
 from typing import NamedTuple
 
 
@@ -237,7 +236,7 @@ def make_train(config):
                     return lambda_loss                    
 
                 def critic_loss(q1_params, q2_params):
-                    log_alpha = alpha_params["log_alpha"]
+                    log_alpha = log_alpha_state
 
                     alpha = jnp.exp(log_alpha)
                     alpha_sg = jax.lax.stop_gradient(alpha)
@@ -297,7 +296,7 @@ def make_train(config):
                     q = q1_state.apply_fn(q1_state.params, obs, z)
                     q = jax.lax.stop_gradient(q)
 
-                    loss = jnp.sum(probs * (alpha * log_probs - q), axis=-1).mean()
+                    loss = jnp.sum(probs * (jnp.exp(log_alpha_state) * log_probs - q), axis=-1).mean()
                     return loss
 
                 def alpha_loss(log_alpha_state):
@@ -340,7 +339,7 @@ def make_train(config):
 
             actor_state, q1_state, q2_state, phi_state = train_state
 
-            init = actor_state, q1_state, q2_state, target_q1_params, target_q2_params, log_lambda_state, log_alpha_state, phi_state, lambda_state, buffer, rng
+            init = actor_state, q1_state, q2_state, target_q1_params, target_q2_params, log_lambda_state, log_alpha_state, phi_state, buffer, rng
             carry, _ = jax.lax.scan(update, init, xs=None, length=config["NUM_UPDATE_STEPS"])
             return carry, _
         
