@@ -5,7 +5,6 @@ import optax
 from flax import linen as nn
 from flax.training.train_state import TrainState
 from craftax.craftax_env import make_craftax_env_from_name
-from logz.batch_logging import batch_log, create_log_dict
 from wrappers import AutoResetEnvWrapper, BatchEnvWrapper, LogWrapper, OptimisticResetVecEnvWrapper
 import flashbax as fbx
 from typing import NamedTuple
@@ -219,7 +218,7 @@ def make_train(config):
                 def phi_loss(phi_params):
                     phi_diff = phi.apply(phi_params, next_obs) - phi.apply(phi_params, obs)
                     abs_sq_diff = abs(phi_diff)**2
-                    r = jnp.sum(phi_diff, z, axis=-1)
+                    r = jnp.sum(phi_diff * z, axis=-1)
 
                     eps = config["LAGRANGE_EPS"]
                     lipschitz = config.get("LIPSCHITZ_CONSTRAINT", 1)
@@ -275,7 +274,7 @@ def make_train(config):
                     )
 
                     phi_diff = phi.apply(phi_params, next_obs) - phi.apply(phi_params, obs)
-                    r = jnp.sum(phi_diff, z, axis=-1)
+                    r = jnp.sum(phi_diff * z, axis=-1)
 
                     target = r + config["GAMMA"] * (
                         1.0 - done
@@ -348,7 +347,7 @@ def make_train(config):
         init = train_state, target_q1_params, target_q2_params, log_lambda_state, log_alpha_state, obs, env_state, buffer, buffer_state, rng
         iterations = config["TOTAL_TIMESTEPS"] // config["NUM_STEPS"] * config["NUM_TRAJECTORIES"]
         carry, _ = jax.lax.scan(train_loop, init, xs=None, length=iterations)
-        train_state, _, _, _, _, _, _, _, _ = carry
+        train_state, _, _, _, _, _, _, _, _, _ = carry
         return train_state
     
     return train
