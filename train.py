@@ -10,9 +10,11 @@ from flax.training import orbax_utils
 from orbax.checkpoint import CheckpointManagerOptions, CheckpointManager
 from orbax.checkpoint._src.checkpointers.pytree_checkpointer import PyTreeCheckpointer
 
+import HAC
 import SAC
 import MOC
 import dqn
+import hac_jax
 import option_critic
 import ppo_shared
 import wandb
@@ -48,6 +50,8 @@ def run(config):
         make_train = dqn.make_train
     elif config["ALGORITHM"] == "SAC":
         make_train = SAC.make_train
+    elif config["ALGORITHM"] == "HAC":
+        make_train = hac_jax.make_train
     else:
         raise ValueError("Unsupported algorithm.")
 
@@ -89,13 +93,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--num_envs",
         type=int,
-        default=512,
+        default=32,
     )
     parser.add_argument(
         "--total_timesteps", type=lambda x: int(float(x)), default=1e6
     )
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--num_steps", type=int, default=8)
+    parser.add_argument("--num_steps", type=int, default=4)
     parser.add_argument("--update_epochs", type=int, default=4)
     parser.add_argument("--num_minibatches", type=int, default=8)
     parser.add_argument("--gamma", type=float, default=0.99)
@@ -113,10 +117,10 @@ if __name__ == "__main__":
     # Prioritised replay
     # Double, dueling, distributional, noisy nets, categorical, rainbow
     # Could use n-step replay buffer
-    parser.add_argument("--num_update_steps", type=int, default=16)
-    parser.add_argument("--warmup", type=int, default=5_000)
-    parser.add_argument("--buffer_capacity", type=int, default=200_000)
-    parser.add_argument("--batch_size", type=int, default=512)
+    parser.add_argument("--num_update_steps", type=int, default=1)
+    parser.add_argument("--warmup", type=int, default=500)
+    parser.add_argument("--buffer_capacity", type=int, default=5_000)
+    parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--epsilon_start", type=float, default=0.9)
     parser.add_argument("--epsilon_end", type=float, default=0.01)
     parser.add_argument("--epsilon_steps", type=int, default=350_000)
@@ -132,6 +136,29 @@ if __name__ == "__main__":
     parser.add_argument("--delib_cost", type=float, default=0.05)
     # MOC
     parser.add_argument("--eta", type=float, default=0.9)
+    # HAC
+    parser.add_argument("--num_levels", type=int, default=2)
+    parser.add_argument("--time_scale", type=int, default=10)
+    parser.add_argument("--goal_indices", type=int, nargs="+", default=None)
+    parser.add_argument("--end_goal", type=float, nargs="+", default=None)
+    parser.add_argument("--goal_threshold", type=float, default=0.05)
+    parser.add_argument("--subgoal_threshold", type=float, default=0.05)
+    parser.add_argument("--subgoal_scale", type=float, default=1.0)
+    parser.add_argument("--subgoal_noise", type=float, default=0.1)
+    parser.add_argument("--atomic_random_prob", type=float, default=0.2)
+    parser.add_argument("--subgoal_random_prob", type=float, default=0.2)
+    parser.add_argument("--subgoal_test_prob", type=float, default=0.3)
+    parser.add_argument(
+        "--subgoal_testing",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser.add_argument("--subgoal_penalty", type=float, default=-10.0)
+    parser.add_argument(
+        "--hindsight_goal_replay",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
 
     parser.add_argument("--debug", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--jit", action=argparse.BooleanOptionalAction, default=True)

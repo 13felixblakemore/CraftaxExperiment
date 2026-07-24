@@ -32,7 +32,7 @@ class Transition(NamedTuple):
     b: jnp.ndarray
 
 
-# could have num_options actors and a separate critic?
+# could have num_options actors and a separate 
 class OptionCritic(nn.Module):
     num_options: int
     action_dim: int
