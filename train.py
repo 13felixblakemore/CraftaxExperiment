@@ -99,11 +99,11 @@ if __name__ == "__main__":
         default=32,
     )
     parser.add_argument(
-        "--total_timesteps", type=lambda x: int(float(x)), default=1e6
+        "--total_timesteps", type=lambda x: int(float(x)), default=1e7
     )
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--num_steps", type=int, default=4)
-    parser.add_argument("--update_epochs", type=int, default=4)
+    parser.add_argument("--num_steps", type=int, default=200)
+    parser.add_argument("--update_epochs", type=int, default=50)
     parser.add_argument("--num_minibatches", type=int, default=8)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--gae_lambda", type=float, default=0.8)
@@ -121,15 +121,15 @@ if __name__ == "__main__":
     # Double, dueling, distributional, noisy nets, categorical, rainbow
     # Could use n-step replay buffer
     parser.add_argument("--num_update_steps", type=int, default=1)
-    parser.add_argument("--warmup", type=int, default=500)
-    parser.add_argument("--buffer_capacity", type=int, default=5_000)
+    parser.add_argument("--warmup", type=int, default=1000)
+    parser.add_argument("--buffer_capacity", type=int, default=10000)
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--epsilon_start", type=float, default=0.9)
     parser.add_argument("--epsilon_end", type=float, default=0.01)
     parser.add_argument("--epsilon_steps", type=int, default=350_000)
     parser.add_argument("--tau", type=float, default=0.005)
     # SAC
-    parser.add_argument("--target_entropy", type=float, default=0.2)
+    parser.add_argument("--target_entropy", type=float, default=0.5)
     parser.add_argument("--alpha_lr", type=float, default=3e-4)
     parser.add_argument("--ent_temp", type=float, default=0.01)
 
@@ -164,16 +164,16 @@ if __name__ == "__main__":
     )
 
     # METRA
-    parser.add_argument("--z_dim", type=int, default=16)
-    parser.add_argument("--num_trajectories", type=int, default=16)
-    parser.add_argument("--lagrange_eps", type=float, default=0.001)
+    parser.add_argument("--z_dim", type=int, default=2)
+    parser.add_argument("--num_trajectories", type=int, default=1)
+    parser.add_argument("--lagrange_eps", type=float, default=1e-3)
     parser.add_argument("--lipschitz_constraint", type=float, default=1.0)
 
     parser.add_argument("--debug", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--jit", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--seed", type=int)
     parser.add_argument(
-        "--use_wandb", action=argparse.BooleanOptionalAction, default=False
+        "--use_wandb", action=argparse.BooleanOptionalAction, default=True
     )
     parser.add_argument("--save_policy", action="store_true")
     parser.add_argument("--num_repeats", type=int, default=1)
