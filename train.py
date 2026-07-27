@@ -10,6 +10,7 @@ from flax.training import orbax_utils
 from orbax.checkpoint import CheckpointManagerOptions, CheckpointManager
 from orbax.checkpoint._src.checkpointers.pytree_checkpointer import PyTreeCheckpointer
 
+import METRA
 import HAC
 import SAC
 import MOC
@@ -52,6 +53,8 @@ def run(config):
         make_train = SAC.make_train
     elif config["ALGORITHM"] == "HAC":
         make_train = hac_jax.make_train
+    elif config["ALGORITHM"] == "METRA":
+        make_train = METRA.make_train
     else:
         raise ValueError("Unsupported algorithm.")
 
@@ -160,11 +163,17 @@ if __name__ == "__main__":
         default=True,
     )
 
+    # METRA
+    parser.add_argument("--z_dim", type=int, default=16)
+    parser.add_argument("--num_trajectories", type=int, default=16)
+    parser.add_argument("--lagrange_eps", type=float, default=0.001)
+    parser.add_argument("--lipschitz_constraint", type=float, default=1.0)
+
     parser.add_argument("--debug", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--jit", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--seed", type=int)
     parser.add_argument(
-        "--use_wandb", action=argparse.BooleanOptionalAction, default=True
+        "--use_wandb", action=argparse.BooleanOptionalAction, default=False
     )
     parser.add_argument("--save_policy", action="store_true")
     parser.add_argument("--num_repeats", type=int, default=1)

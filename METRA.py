@@ -8,6 +8,7 @@ from craftax.craftax_env import make_craftax_env_from_name
 from wrappers import AutoResetEnvWrapper, BatchEnvWrapper, LogWrapper, OptimisticResetVecEnvWrapper
 import flashbax as fbx
 from typing import NamedTuple
+import gymnax
 
 
 class Encoder(nn.Module):
@@ -60,6 +61,7 @@ class Transition(NamedTuple):
 def make_train(config):
     env = make_craftax_env_from_name(config["ENV_NAME"], not config["USE_OPTIMISTIC_RESETS"])
     env_params = env.default_params
+    env, env_params = gymnax.make("MountainCar-v0")
     env = LogWrapper(env)
 
     if config["USE_OPTIMISTIC_RESETS"]:
@@ -93,7 +95,7 @@ def make_train(config):
             return z
         
         rng, _rng = jax.random.split(rng)
-        dummy_z = sample_z(_rng)
+        dummy_z = jnp.zeros((1, config["Z_DIM"]), dtype=jnp.float32)
 
         rng, actor_key, q1_key, q2_key, phi_key = jax.random.split(rng, 5)
 
@@ -105,37 +107,37 @@ def make_train(config):
         actor_state = TrainState.create(
             apply_fn=actor.apply,
             params=actor_params,
-            tx=optax.adam(config["ACTOR_LR"]),
+            tx=optax.adam(config["LR"]),
         )
 
         q1_state = TrainState.create(
             apply_fn=q1.apply,
             params=q1_params,
-            tx=optax.adam(config["CRITIC_LR"]),
+            tx=optax.adam(config["LR"]),
         )
 
         q2_state = TrainState.create(
             apply_fn=q2.apply,
             params=q2_params,
-            tx=optax.adam(config["CRITIC_LR"]),
+            tx=optax.adam(config["LR"]),
         )
 
         phi_state = TrainState.create(
             apply_fn=phi.apply,
             params=phi_params,
-            tx=optax.adam(config["PHI_LR"])
+            tx=optax.adam(config["LR"])
         )
 
         log_alpha_state = TrainState.create(
             apply_fn=lambda params: params,
             params=jnp.array(jnp.log(config.get("ALPHA_INIT", 0.01))),
-            tx=optax.adam(config["ALPHA_LR"]),
+            tx=optax.adam(config["LR"]),
         )
 
         log_lambda_state = TrainState.create(
             apply_fn=lambda params: params,
             params=jnp.array(0.0),
-            tx=optax.adam(config["LAMBDA_LR"]),
+            tx=optax.adam(config["LR"]),
         )
 
         target_q1_params = q1_params
@@ -144,7 +146,7 @@ def make_train(config):
         rng, _rng = jax.random.split(rng)
         obs, env_state = env.reset(_rng, env_params)
 
-        buffer = fbx.make_item_buffer(config["CAPACITY"], config["WARMUP"], config["BATCH_SIZE"], False, True)
+        buffer = fbx.make_item_buffer(config["BUFFER_CAPACITY"], config["WARMUP"], config["BATCH_SIZE"], add_sequences=False, add_batches=True)
 
         single_obs = jax.tree.map(lambda x: x[0], obs)
 
@@ -152,7 +154,7 @@ def make_train(config):
             obs=single_obs,
             action=jnp.zeros((), dtype=jnp.int32),
             next_obs=single_obs,
-            z=jnp.zeros((config["Z_DIM"],), dtype=jnp.float32),
+            z=jnp.zeros((config["Z_DIM"],), dtype=jnp.float32), 
             done=jnp.zeros((), dtype=jnp.bool_),
         )
 
@@ -182,7 +184,7 @@ def make_train(config):
                     carry = next_obs, next_env_state, z, rng
                     return carry, transition
 
-                obs, env_state, buffer, buffer_state, rng = carry
+                obs, env_state, buffer_state, rng = carry
 
                 rng, _rng = jax.random.split(rng)
                 z = sample_z(rng)
@@ -191,52 +193,63 @@ def make_train(config):
                 state, transitions = jax.lax.scan(step, init, xs=None, length=config["NUM_STEPS"])
 
                 obs, env_state, z, _rng = state
+
+                transitions = jax.tree.map(
+                    lambda x: x.reshape((-1, *x.shape[2:])),
+                    transitions,
+                )
+
                 buffer_state = buffer.add(buffer_state, transitions)
-                carry = obs, env_state, buffer, buffer_state, rng
+                carry = obs, env_state, buffer_state, rng
                 return carry, _
 
-            train_state, target_q1_params, target_q2_params, log_lambda_state, log_alpha_state, obs, env_state, buffer, buffer_state, rng = carry
-            init = obs, env_state, buffer, buffer_state, rng
+            train_state, target_q1_params, target_q2_params, log_lambda_state, log_alpha_state, obs, env_state, buffer_state, rng = carry
+            actor_state, q1_state, q2_state, phi_state = train_state
+            print("pre rollout")
+            init = obs, env_state, buffer_state, rng
             carry, _ = jax.lax.scan(collect_rollout, init, xs=None, length=config["NUM_TRAJECTORIES"])
+            
+            print("past rollout")
 
-
-            obs, env_state, buffer, buffer_state, rng = carry
+            obs, env_state, buffer_state, rng = carry
 
             def update(carry, _):
-                actor_state, q1_state, q2_state, target_q1_params, target_q2_params, log_lambda_state, log_alpha_state, phi_state, lambda_state, buffer, rng = carry
+                actor_state, q1_state, q2_state, target_q1_params, target_q2_params, log_lambda_state, log_alpha_state, phi_state, rng = carry
                 actor_params = actor_state.params
                 q1_params = q1_state.params
                 q2_params = q2_state.params
                 phi_params = phi_state.params
 
-
+                log_lambda = log_lambda_state.params
+                log_alpha = log_alpha_state.params
+            
                 rng, _rng = jax.random.split(rng)
                 transition = buffer.sample(buffer_state, _rng).experience
 
                 obs, action, next_obs, z, done = transition
-                
+
                 def phi_loss(phi_params):
                     phi_diff = phi.apply(phi_params, next_obs) - phi.apply(phi_params, obs)
-                    abs_sq_diff = abs(phi_diff)**2
+                    abs_sq_diff = abs(phi_diff) ** 2
                     r = jnp.sum(phi_diff * z, axis=-1)
 
                     eps = config["LAGRANGE_EPS"]
                     lipschitz = config.get("LIPSCHITZ_CONSTRAINT", 1)
-                    phi_loss = -r + lambda_state * jnp.minimum(eps, (lipschitz-abs_sq_diff))
-                    return phi_loss
+                    penalty = jnp.minimum(eps, (lipschitz - abs_sq_diff)).sum(axis=-1)
+                    phi_loss = -r + jnp.exp(log_lambda) * penalty
+                    return jnp.mean(phi_loss)
 
-                def lambda_loss(log_lambda_state):
+                def lambda_loss(log_lambda):
                     phi_diff = phi.apply(phi_params, next_obs) - phi.apply(phi_params, obs)
-                    abs_sq_diff = abs(phi_diff)**2
+                    abs_sq_diff = abs(phi_diff) ** 2
 
                     eps = config["LAGRANGE_EPS"]
                     lipschitz = config.get("LIPSCHITZ_CONSTRAINT", 1)
-                    lambda_loss = jnp.exp(log_lambda_state) * jnp.minimum(eps, (lipschitz-abs_sq_diff))
-                    return lambda_loss                    
+                    penalty = jnp.minimum(eps, (lipschitz - abs_sq_diff)).sum(axis=-1)
+                    lambda_loss = jnp.exp(log_lambda) * penalty
+                    return jnp.mean(lambda_loss)
 
                 def critic_loss(q1_params, q2_params):
-                    log_alpha = log_alpha_state
-
                     alpha = jnp.exp(log_alpha)
                     alpha_sg = jax.lax.stop_gradient(alpha)
 
@@ -295,10 +308,10 @@ def make_train(config):
                     q = q1_state.apply_fn(q1_state.params, obs, z)
                     q = jax.lax.stop_gradient(q)
 
-                    loss = jnp.sum(probs * (jnp.exp(log_alpha_state) * log_probs - q), axis=-1).mean()
+                    loss = jnp.sum(probs * (jnp.exp(log_alpha) * log_probs - q), axis=-1).mean()
                     return loss
 
-                def alpha_loss(log_alpha_state):
+                def alpha_loss(log_alpha):
                     logits = actor_state.apply_fn(actor_params, obs, z)
                     probs = jax.nn.softmax(logits)
                     log_probs = jax.nn.log_softmax(logits)
@@ -316,35 +329,33 @@ def make_train(config):
                     return alpha_loss
 
                 phi_loss, grad = jax.value_and_grad(phi_loss)(phi_params)
-                phi_state = phi_state.apply_gradients(grad)
+                phi_state = phi_state.apply_gradients(grads=grad)
 
-                lambda_loss, grad = jax.value_and_grad(lambda_loss)(log_lambda_state)
-                log_lambda_state = lambda_state.apply_gradients(grad)
+                lambda_loss, grad = jax.value_and_grad(lambda_loss)(log_lambda)
+                log_lambda_state = log_lambda_state.apply_gradients(grads=grad)
 
                 critic_loss, grad = jax.value_and_grad(critic_loss, argnums=(0,1))(q1_params, q2_params)
-                q1_state = q1_state.apply_gradients(grad)
-                q2_state = q2_state.apply_gradients(grad)
+                grad1, grad2 = grad
+                q1_state = q1_state.apply_gradients(grads=grad1)
+                q2_state = q2_state.apply_gradients(grads=grad2)
 
                 actor_loss, grad = jax.value_and_grad(actor_loss)(actor_params)
-                actor_state = actor_state.apply_gradients(grad)
+                actor_state = actor_state.apply_gradients(grads=grad)
 
-                alpha_loss, grad = jax.value_and_grad(alpha_loss)(log_alpha_state)
-                log_alpha_state = log_alpha_state.apply_gradients(grad)
+                alpha_loss, grad = jax.value_and_grad(alpha_loss)(log_alpha)
+                log_alpha_state = log_alpha_state.apply_gradients(grads=grad)
 
-                carry = actor_state, q1_state, q2_state, target_q1_params, target_q2_params, log_lambda_state, log_alpha_state, phi_state, buffer, rng
+                carry = actor_state, q1_state, q2_state, target_q1_params, target_q2_params, log_lambda_state, log_alpha_state, phi_state, rng
 
                 return carry, _
-            
 
-            actor_state, q1_state, q2_state, phi_state = train_state
-
-            init = actor_state, q1_state, q2_state, target_q1_params, target_q2_params, log_lambda_state, log_alpha_state, phi_state, buffer, rng
+            init = actor_state, q1_state, q2_state, target_q1_params, target_q2_params, log_lambda_state, log_alpha_state, phi_state, rng
             carry, _ = jax.lax.scan(update, init, xs=None, length=config["NUM_UPDATE_STEPS"])
             return carry, _
         
         train_state = actor_state, q1_state, q2_state, phi_state
 
-        init = train_state, target_q1_params, target_q2_params, log_lambda_state, log_alpha_state, obs, env_state, buffer, buffer_state, rng
+        init = train_state, target_q1_params, target_q2_params, log_lambda_state, log_alpha_state, obs, env_state, buffer_state, rng
         iterations = config["TOTAL_TIMESTEPS"] // config["NUM_STEPS"] * config["NUM_TRAJECTORIES"]
         carry, _ = jax.lax.scan(train_loop, init, xs=None, length=iterations)
         train_state, _, _, _, _, _, _, _, _, _ = carry
