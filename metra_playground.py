@@ -102,6 +102,18 @@ def _select_observation(obs, obs_key: str) -> jax.Array:
     return obs
 
 
+def get_metra_obs(env_state):
+    policy_obs = _select_observation(env_state.obs, "state")
+
+    # Walker planar root coordinates are x, z, pitch, followed by joints.
+    root_x = env_state.data.qpos[..., 0:1]
+
+    return jnp.concatenate(
+        [policy_obs, root_x],
+        axis=-1,
+    )
+
+
 def make_train(config):
     """Builds a JAX METRA + continuous SAC training function for Playground."""
 
@@ -174,7 +186,7 @@ def make_train(config):
         rng, reset_key = jax.random.split(rng)
         reset_keys = jax.random.split(reset_key, num_envs)
         env_state = env.reset(reset_keys)
-        obs = _select_observation(env_state.obs, obs_key)
+        obs = get_metra_obs(env_state)
 
         if obs.ndim != 2:
             raise ValueError(
@@ -318,7 +330,7 @@ def make_train(config):
                     )
 
                     next_env_state = env.step(env_state, action)
-                    next_obs = _select_observation(next_env_state.obs, obs_key)
+                    next_obs = get_metra_obs(next_env_state)
                     env_reward = next_env_state.reward.astype(jnp.float32)
                     done = next_env_state.done > 0.0
 
