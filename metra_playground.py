@@ -115,6 +115,21 @@ def get_metra_obs(env_state):
         axis=-1,
     )
 
+def _get_policy_observation(env_state, config) -> jax.Array:
+    """Constructs exactly the observation used by actor, critics, and phi."""
+    obs = _select_observation(
+        env_state.obs,
+        config.get("OBS_KEY", "state"),
+    )
+
+    # Recommended for METRA on WalkerWalk because its standard observation
+    # omits global horizontal position.
+    if config.get("INCLUDE_ROOT_X", False):
+        root_x = env_state.data.qpos[..., 0:1]
+        obs = jnp.concatenate([obs, root_x], axis=-1)
+
+    return obs
+
 
 def make_train(config):
     """Builds a JAX METRA + continuous SAC training function for Playground."""
