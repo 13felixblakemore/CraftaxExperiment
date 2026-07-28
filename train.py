@@ -179,7 +179,7 @@ if __name__ == "__main__":
 
     # METRA
     parser.add_argument("--z_dim", type=int, default=2)
-    parser.add_argument("--num_trajectories", type=int, default=1)
+    parser.add_argument("--num_trajectories", type=int, default=8)
     parser.add_argument("--lagrange_eps", type=float, default=1e-3)
     parser.add_argument("--lipschitz_constraint", type=float, default=1.0)
     parser.add_argument("--discrete", type=bool, default=True)
