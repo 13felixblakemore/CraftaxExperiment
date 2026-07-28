@@ -158,6 +158,20 @@ def make_train(config):
                 z = z / (jnp.linalg.norm(z, axis=-1, keepdims=True) + 1e-8)
             return z
 
+        def sample_z_discrete(key: jax.Array) -> jax.Array:
+            skill_ids = jax.random.randint(
+                key,
+                shape=(num_envs,),
+                minval=0,
+                maxval=config["Z_DIM"],
+            )
+
+            return jax.nn.one_hot(
+                skill_ids,
+                config["Z_DIM"],
+                dtype=jnp.float32,
+            )
+
         def sample_action(
             actor_params,
             obs: jax.Array,
@@ -519,7 +533,17 @@ def make_train(config):
                     phi_next = phi.apply(current_phi_params, next_obs_b)
                     phi_diff = phi_next - phi_obs
 
-                    raw_r = jnp.sum(phi_diff * z_b, axis=-1)
+                    if config.get("DISCRETE", False):
+                        num_skills = config["Z_DIM"]
+
+                        skill_mask = (
+                                             z_b - jnp.mean(z_b, axis=-1, keepdims=True)
+                                     ) * num_skills / max(num_skills - 1, 1)
+
+                        raw_r = jnp.sum(phi_diff * skill_mask, axis=-1)
+                    else:
+                        raw_r = jnp.sum(phi_diff * z_b, axis=-1)
+
                     r = raw_r * nonterminal
 
                     # This preserves your dual_dist='one' implementation.

@@ -171,6 +171,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_trajectories", type=int, default=1)
     parser.add_argument("--lagrange_eps", type=float, default=1e-3)
     parser.add_argument("--lipschitz_constraint", type=float, default=1.0)
+    parser.add_argument("--discrete", type=bool, default=True)
 
     parser.add_argument("--debug", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--jit", action=argparse.BooleanOptionalAction, default=True)
