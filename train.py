@@ -105,7 +105,7 @@ if __name__ == "__main__":
         "--total_timesteps", type=lambda x: int(float(x)), default=1e7
     )
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--num_steps", type=int, default=32)
+    parser.add_argument("--num_steps", type=int, default=200)
     parser.add_argument("--update_epochs", type=int, default=50)
     parser.add_argument("--num_minibatches", type=int, default=8)
     parser.add_argument("--gamma", type=float, default=0.99)
@@ -123,7 +123,7 @@ if __name__ == "__main__":
     # Prioritised replay
     # Double, dueling, distributional, noisy nets, categorical, rainbow
     # Could use n-step replay buffer
-    parser.add_argument("--num_update_steps", type=int, default=32)
+    parser.add_argument("--num_update_steps", type=int, default=400)
     parser.add_argument("--warmup", type=int, default=10_000)
     parser.add_argument("--buffer_capacity", type=int, default=1_000_000)
     parser.add_argument("--batch_size", type=int, default=16)
@@ -132,7 +132,7 @@ if __name__ == "__main__":
     parser.add_argument("--epsilon_steps", type=int, default=350_000)
     parser.add_argument("--tau", type=float, default=0.005)
     # SAC
-    parser.add_argument("--target_entropy", type=float, default=0.5)
+    parser.add_argument("--target_entropy", type=float, default=-3.0)
     parser.add_argument("--alpha_lr", type=float, default=3e-4)
     parser.add_argument("--ent_temp", type=float, default=0.01)
 
@@ -180,7 +180,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--save_policy", action="store_true")
     parser.add_argument("--num_repeats", type=int, default=1)
-    parser.add_argument("--layer_size", type=int, default=64)
+    parser.add_argument("--layer_size", type=int, default=1024)
     parser.add_argument("--wandb_project", type=str)
     parser.add_argument("--wandb_entity", type=str)
     parser.add_argument(
