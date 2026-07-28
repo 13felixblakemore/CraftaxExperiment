@@ -1097,7 +1097,7 @@ def record_eval_videos(
         episode_return = 0.0
 
         for _ in range(episode_length):
-            obs = _get_policy_observation(state, config)
+            obs = get_metra_obs(state)
 
             action = deterministic_action(
                 actor_state.params,
