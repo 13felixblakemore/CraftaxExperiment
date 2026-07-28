@@ -62,10 +62,10 @@ def run(config):
         raise ValueError("Unsupported algorithm.")
 
     train_jit = jax.jit(make_train(config))
-    train_vmap = jax.vmap(train_jit)
+    #train_vmap = jax.vmap(train_jit)
 
     t0 = time.time()
-    out = train_vmap(rngs)
+    out = train_jit(rngs[0])
     jax.block_until_ready(out)
     t1 = time.time()
     print("Time to run experiment", t1 - t0)
