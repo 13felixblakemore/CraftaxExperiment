@@ -281,7 +281,7 @@ def make_train(config):
         target_q2_params = q2_params
 
         rng, z_key = jax.random.split(rng)
-        z = sample_z(z_key)
+        z = sample_z_discrete(z_key)
 
         buffer = fbx.make_item_buffer(
             config["BUFFER_CAPACITY"],
