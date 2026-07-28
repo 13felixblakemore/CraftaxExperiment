@@ -10,6 +10,8 @@ import optax
 from craftax.craftax_env import make_craftax_env_from_name
 from flax import linen as nn
 from flax.training.train_state import TrainState
+from mujoco_playground import wrapper
+from mujoco_playground import registry
 
 from logz.batch_logging import batch_log
 from wrappers import (
@@ -78,6 +80,9 @@ def make_train(config):
             not config["USE_OPTIMISTIC_RESETS"],
         )
         env_params = env.default_params
+
+    env_name = 'Go1JoystickFlatTerrain'
+    env = registry.load(env_name)
 
     env = LogWrapper(env)
 

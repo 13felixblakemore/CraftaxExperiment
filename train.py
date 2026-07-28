@@ -16,6 +16,7 @@ import SAC
 import MOC
 import dqn
 import hac_jax
+import metra_playground
 import option_critic
 import ppo_shared
 import wandb
@@ -55,6 +56,8 @@ def run(config):
         make_train = hac_jax.make_train
     elif config["ALGORITHM"] == "METRA":
         make_train = METRA.make_train
+    elif config["ALGORITHM"] == "METRA_PLAYGROUND":
+        make_train = metra_playground.make_train
     else:
         raise ValueError("Unsupported algorithm.")
 
@@ -91,18 +94,18 @@ def run(config):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--env_name", type=str, default="Craftax-Symbolic-v1")
+    parser.add_argument("--env_name", type=str, default="WalkerWalk")
     parser.add_argument("--algorithm", type=str, default="PPO")
     parser.add_argument(
         "--num_envs",
         type=int,
-        default=32,
+        default=64,
     )
     parser.add_argument(
-        "--total_timesteps", type=lambda x: int(float(x)), default=1e7
+        "--total_timesteps", type=lambda x: int(float(x)), default=1e3
     )
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--num_steps", type=int, default=200)
+    parser.add_argument("--num_steps", type=int, default=32)
     parser.add_argument("--update_epochs", type=int, default=50)
     parser.add_argument("--num_minibatches", type=int, default=8)
     parser.add_argument("--gamma", type=float, default=0.99)
@@ -120,9 +123,9 @@ if __name__ == "__main__":
     # Prioritised replay
     # Double, dueling, distributional, noisy nets, categorical, rainbow
     # Could use n-step replay buffer
-    parser.add_argument("--num_update_steps", type=int, default=1)
+    parser.add_argument("--num_update_steps", type=int, default=32)
     parser.add_argument("--warmup", type=int, default=1000)
-    parser.add_argument("--buffer_capacity", type=int, default=10000)
+    parser.add_argument("--buffer_capacity", type=int, default=100000)
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--epsilon_start", type=float, default=0.9)
     parser.add_argument("--epsilon_end", type=float, default=0.01)
