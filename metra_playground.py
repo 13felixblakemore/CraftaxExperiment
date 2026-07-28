@@ -11,7 +11,9 @@ from flax import linen as nn
 from flax.training.train_state import TrainState
 from mujoco_playground import registry
 from mujoco_playground import wrapper
+from pathlib import Path
 
+import mediapy as media
 from logz.batch_logging import batch_log
 
 
@@ -938,6 +940,205 @@ def make_train(config):
         )
 
         train_state = carry[0]
+
         return train_state
 
     return train
+
+
+def _make_eval_latents(config) -> jax.Array:
+    """Returns a deterministic collection of skills for evaluation."""
+    z_dim = int(config["Z_DIM"])
+
+    if config.get("DISCRETE", False):
+        # One video for every discrete one-hot skill.
+        return jnp.eye(z_dim, dtype=jnp.float32)
+
+    if z_dim == 1:
+        return jnp.array(
+            [
+                [-1.0],
+                [1.0],
+            ],
+            dtype=jnp.float32,
+        )
+
+    if z_dim == 2:
+        # Evaluate evenly spaced directions around the unit circle.
+        num_skills = int(config.get("NUM_EVAL_SKILLS", 8))
+        angles = jnp.linspace(
+            0.0,
+            2.0 * jnp.pi,
+            num_skills,
+            endpoint=False,
+        )
+
+        return jnp.stack(
+            [
+                jnp.cos(angles),
+                jnp.sin(angles),
+            ],
+            axis=-1,
+        )
+
+    # For higher-dimensional continuous latents, use fixed random directions.
+    num_skills = int(config.get("NUM_EVAL_SKILLS", 8))
+    key = jax.random.PRNGKey(int(config.get("EVAL_SEED", 0)))
+
+    z = jax.random.normal(
+        key,
+        shape=(num_skills, z_dim),
+    )
+
+    if config.get("UNIT_Z", True):
+        z = z / (
+            jnp.linalg.norm(z, axis=-1, keepdims=True) + 1e-8
+        )
+
+    return z.astype(jnp.float32)
+
+
+def record_eval_videos(
+    config,
+    actor_state: TrainState,
+) -> list[Path]:
+    """Records one deterministic rollout for every evaluation skill."""
+
+    env_name = config.get("ENV_NAME", "WalkerWalk")
+    env_config = registry.get_default_config(env_name)
+
+    env_config_overrides = dict(
+        config.get("ENV_CONFIG_OVERRIDES", {})
+    )
+
+    if "PLAYGROUND_IMPL" in config:
+        env_config_overrides["impl"] = config["PLAYGROUND_IMPL"]
+
+    # Use the raw, unbatched environment for rendering.
+    eval_env = registry.load(
+        env_name,
+        config=env_config,
+        config_overrides=env_config_overrides or None,
+    )
+
+    actor = Actor(
+        dim=config["LAYER_SIZE"],
+        action_dim=eval_env.action_size,
+        log_std_min=config.get("LOG_STD_MIN", -5.0),
+        log_std_max=config.get("LOG_STD_MAX", 2.0),
+    )
+
+    reset_fn = jax.jit(eval_env.reset)
+    step_fn = jax.jit(eval_env.step)
+
+    @jax.jit
+    def deterministic_action(
+        actor_params,
+        obs: jax.Array,
+        z: jax.Array,
+    ) -> jax.Array:
+        mean, _ = actor.apply(
+            actor_params,
+            obs,
+            z,
+        )
+
+        # The mean is in pre-tanh space.
+        return jnp.tanh(mean)
+
+    eval_zs = _make_eval_latents(config)
+
+    episode_length = int(
+        config.get("EVAL_EPISODE_LENGTH", config.get("EPISODE_LENGTH", 200))
+    )
+    action_repeat = int(config.get("ACTION_REPEAT", 1))
+
+    camera = config.get(
+        "EVAL_CAMERA",
+        "side" if env_name in {"WalkerWalk", "WalkerRun", "WalkerStand"} else None,
+    )
+
+    width = int(config.get("EVAL_WIDTH", 640))
+    height = int(config.get("EVAL_HEIGHT", 480))
+
+    output_dir = Path(
+        config.get("EVAL_VIDEO_DIR", "eval_videos")
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    base_key = jax.random.PRNGKey(
+        int(config.get("EVAL_SEED", config.get("SEED", 0)))
+    )
+
+    output_paths = []
+
+    for skill_index in range(eval_zs.shape[0]):
+        z = eval_zs[skill_index]
+
+        reset_key = jax.random.fold_in(base_key, skill_index)
+        state = reset_fn(reset_key)
+
+        rollout = [state]
+        episode_return = 0.0
+
+        for _ in range(episode_length):
+            obs = _get_policy_observation(state, config)
+
+            action = deterministic_action(
+                actor_state.params,
+                obs,
+                z,
+            )
+
+            # Match the action-repeat behaviour used by the training wrapper.
+            step_reward = 0.0
+
+            for _ in range(action_repeat):
+                state = step_fn(state, action)
+                step_reward += float(jax.device_get(state.reward))
+
+            episode_return += step_reward
+            rollout.append(state)
+
+            if bool(jax.device_get(state.done)):
+                break
+
+        render_kwargs = {
+            "width": width,
+            "height": height,
+        }
+
+        if camera is not None:
+            render_kwargs["camera"] = camera
+
+        frames = eval_env.render(
+            rollout,
+            **render_kwargs,
+        )
+
+        video_path = output_dir / (
+            f"{env_name}_skill_{skill_index:02d}.mp4"
+        )
+
+        # Each recorded frame corresponds to one policy action.
+        fps = 1.0 / (float(eval_env.dt) * action_repeat)
+
+        media.write_video(
+            str(video_path),
+            frames,
+            fps=fps,
+        )
+
+        z_host = jax.device_get(z)
+
+        print(
+            f"Recorded skill {skill_index}: "
+            f"z={z_host}, "
+            f"return={episode_return:.2f}, "
+            f"steps={len(rollout) - 1}, "
+            f"path={video_path}"
+        )
+
+        output_paths.append(video_path)
+
+    return output_paths

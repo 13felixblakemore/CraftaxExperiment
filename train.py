@@ -70,6 +70,17 @@ def run(config):
     t1 = time.time()
     print("Time to run experiment", t1 - t0)
     print("SPS: ", config["TOTAL_TIMESTEPS"] / (t1 - t0))
+    if config.get("EVAL", True):
+        actor_state = out[0]
+
+        video_paths = metra_playground.record_eval_videos(
+            config,
+            actor_state,
+        )
+
+        print("Evaluation recordings:")
+        for video_path in video_paths:
+            print(video_path)
 
     if config["USE_WANDB"]:
 
@@ -102,7 +113,7 @@ if __name__ == "__main__":
         default=64,
     )
     parser.add_argument(
-        "--total_timesteps", type=lambda x: int(float(x)), default=1e7
+        "--total_timesteps", type=lambda x: int(float(x)), default=1e6
     )
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--num_steps", type=int, default=200)
