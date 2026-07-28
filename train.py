@@ -102,7 +102,7 @@ if __name__ == "__main__":
         default=64,
     )
     parser.add_argument(
-        "--total_timesteps", type=lambda x: int(float(x)), default=1e3
+        "--total_timesteps", type=lambda x: int(float(x)), default=1e7
     )
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--num_steps", type=int, default=32)
@@ -124,8 +124,8 @@ if __name__ == "__main__":
     # Double, dueling, distributional, noisy nets, categorical, rainbow
     # Could use n-step replay buffer
     parser.add_argument("--num_update_steps", type=int, default=32)
-    parser.add_argument("--warmup", type=int, default=1000)
-    parser.add_argument("--buffer_capacity", type=int, default=100000)
+    parser.add_argument("--warmup", type=int, default=10_000)
+    parser.add_argument("--buffer_capacity", type=int, default=1_000_000)
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--epsilon_start", type=float, default=0.9)
     parser.add_argument("--epsilon_end", type=float, default=0.01)
