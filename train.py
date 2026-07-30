@@ -10,6 +10,7 @@ from flax.training import orbax_utils
 from orbax.checkpoint import CheckpointManagerOptions, CheckpointManager
 from orbax.checkpoint._src.checkpointers.pytree_checkpointer import PyTreeCheckpointer
 
+import metra_brax_ant
 import METRA
 import HAC
 import SAC
@@ -17,6 +18,7 @@ import MOC
 import dqn
 import hac_jax
 import metra_playground
+import metra_minimal_eval
 import option_critic
 import ppo_shared
 import wandb
@@ -57,7 +59,9 @@ def run(config):
     elif config["ALGORITHM"] == "METRA":
         make_train = METRA.make_train
     elif config["ALGORITHM"] == "METRA_PLAYGROUND":
-        make_train = metra_playground.make_train
+        make_train = metra_minimal_eval.make_train
+    elif config["ALGORITHM"] == "METRA_BRAX_ANT":
+        make_train = metra_brax_ant.make_train
     else:
         raise ValueError("Unsupported algorithm.")
 
@@ -70,12 +74,16 @@ def run(config):
     t1 = time.time()
     print("Time to run experiment", t1 - t0)
     print("SPS: ", config["TOTAL_TIMESTEPS"] / (t1 - t0))
-    if config.get("EVAL", True):
-        actor_state = out[0]
+    if (
+        config.get("EVAL", True)
+        and config["ALGORITHM"] == "METRA_BRAX_ANT"
+    ):
+        actor_state, q1_state, q2_state, phi_state = out
 
-        video_paths = metra_playground.record_eval_videos(
+        video_paths = metra_brax_ant.record_eval_videos(
             config,
             actor_state,
+            phi_state,
         )
 
         print("Evaluation recordings:")
@@ -110,7 +118,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--num_envs",
         type=int,
-        default=64,
+        default=128,
     )
     parser.add_argument(
         "--total_timesteps", type=lambda x: int(float(x)), default=1e6
@@ -134,7 +142,7 @@ if __name__ == "__main__":
     # Prioritised replay
     # Double, dueling, distributional, noisy nets, categorical, rainbow
     # Could use n-step replay buffer
-    parser.add_argument("--num_update_steps", type=int, default=400)
+    parser.add_argument("--num_update_steps", type=int, default=800)
     parser.add_argument("--warmup", type=int, default=10_000)
     parser.add_argument("--buffer_capacity", type=int, default=1_000_000)
     parser.add_argument("--batch_size", type=int, default=256)
@@ -178,12 +186,29 @@ if __name__ == "__main__":
     )
 
     # METRA
-    parser.add_argument("--z_dim", type=int, default=2)
+    parser.add_argument("--z_dim", type=int, default=8)
     parser.add_argument("--num_trajectories", type=int, default=8)
     parser.add_argument("--lagrange_eps", type=float, default=1e-3)
     parser.add_argument("--lipschitz_constraint", type=float, default=1.0)
-    parser.add_argument("--discrete", type=bool, default=True)
+    parser.add_argument("--discrete", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--episode_length", type=int, default=200)
+    parser.add_argument(
+        "--brax_backend",
+        type=str,
+        default="mjx",
+    )
+
+    parser.add_argument(
+        "--action_repeat",
+        type=int,
+        default=1,
+    )
+
+    parser.add_argument(
+        "--phi_xy_only",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
 
     parser.add_argument("--debug", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--jit", action=argparse.BooleanOptionalAction, default=True)

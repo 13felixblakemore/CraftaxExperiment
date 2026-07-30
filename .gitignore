@@ -5,3 +5,5 @@ wandb/
 episode_ppo.gif
 episode.gif
 anim.gif
+eval_videos/
+eval_videos_brax_ant/

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import NamedTuple
-
+import csv
+import json
+import numpy as np
 import flashbax as fbx
 import jax
 import jax.numpy as jnp
@@ -298,7 +300,11 @@ def make_train(config):
         target_q2_params = q2_params
 
         rng, z_key = jax.random.split(rng)
-        z = sample_z_discrete(z_key)
+
+        if config["DISCRETE"]:
+            z = sample_z_discrete(z_key)
+        else:
+            z = sample_z(z_key)
 
         buffer = fbx.make_item_buffer(
             config["BUFFER_CAPACITY"],
@@ -400,7 +406,10 @@ def make_train(config):
 
                     # Keep one skill fixed for an episode, then resample it.
                     rng, z_key = jax.random.split(rng)
-                    new_z = sample_z(z_key)
+                    if config["DISCRETE"]:
+                        new_z = sample_z_discrete(z_key)
+                    else:
+                        new_z = sample_z(z_key)
                     z = jnp.where(done[:, None], new_z, z)
 
                     step_info = {
@@ -592,7 +601,7 @@ def make_train(config):
                     comp = metra_components(current_phi_params)
                     lambda_ = jnp.exp(log_lambda)
                     objective = (
-                        config.get("METRA_REWARD_SCALE", 10.0) * comp["r"]
+                        comp["r"]
                         + jax.lax.stop_gradient(lambda_)
                         * comp["cst_penalty"]
                     )
@@ -690,7 +699,7 @@ def make_train(config):
                     )
 
                     comp = metra_components(phi_state.params)
-                    intrinsic_r = jax.lax.stop_gradient(comp["r"])
+                    intrinsic_r = config.get("METRA_REWARD_SCALE", 10.0) * jax.lax.stop_gradient(comp["r"])
                     target = (
                         intrinsic_r
                         + config["GAMMA"] * nonterminal * next_v
@@ -966,7 +975,6 @@ def _make_eval_latents(config) -> jax.Array:
     z_dim = int(config["Z_DIM"])
 
     if config.get("DISCRETE", False):
-        # One video for every discrete one-hot skill.
         return jnp.eye(z_dim, dtype=jnp.float32)
 
     if z_dim == 1:
@@ -979,8 +987,8 @@ def _make_eval_latents(config) -> jax.Array:
         )
 
     if z_dim == 2:
-        # Evaluate evenly spaced directions around the unit circle.
         num_skills = int(config.get("NUM_EVAL_SKILLS", 8))
+
         angles = jnp.linspace(
             0.0,
             2.0 * jnp.pi,
@@ -996,9 +1004,10 @@ def _make_eval_latents(config) -> jax.Array:
             axis=-1,
         )
 
-    # For higher-dimensional continuous latents, use fixed random directions.
     num_skills = int(config.get("NUM_EVAL_SKILLS", 8))
-    key = jax.random.PRNGKey(int(config.get("EVAL_SEED", 0)))
+    key = jax.random.PRNGKey(
+        int(config.get("EVAL_SEED", 0))
+    )
 
     z = jax.random.normal(
         key,
@@ -1007,18 +1016,15 @@ def _make_eval_latents(config) -> jax.Array:
 
     if config.get("UNIT_Z", True):
         z = z / (
-            jnp.linalg.norm(z, axis=-1, keepdims=True) + 1e-8
+            jnp.linalg.norm(z, axis=-1, keepdims=True)
+            + 1e-8
         )
 
     return z.astype(jnp.float32)
 
 
-def record_eval_videos(
-    config,
-    actor_state: TrainState,
-) -> list[Path]:
-    """Records one deterministic rollout for every evaluation skill."""
-
+def _make_raw_eval_env(config):
+    """Creates the raw unbatched environment used for evaluation."""
     env_name = config.get("ENV_NAME", "WalkerWalk")
     env_config = registry.get_default_config(env_name)
 
@@ -1029,12 +1035,188 @@ def record_eval_videos(
     if "PLAYGROUND_IMPL" in config:
         env_config_overrides["impl"] = config["PLAYGROUND_IMPL"]
 
-    # Use the raw, unbatched environment for rendering.
     eval_env = registry.load(
         env_name,
         config=env_config,
         config_overrides=env_config_overrides or None,
     )
+
+    return env_name, eval_env
+
+
+def _eval_reward_vector(
+    z: jax.Array,
+    config,
+) -> jax.Array:
+    """Returns the skill vector used by the METRA reward."""
+    if not config.get("DISCRETE", False):
+        return z
+
+    num_skills = int(config["Z_DIM"])
+
+    return (
+        z - jnp.mean(z, axis=-1, keepdims=True)
+    ) * num_skills / max(num_skills - 1, 1)
+
+
+def _read_qpos(
+    state,
+    index: int | None,
+) -> float:
+    """Safely reads one qpos coordinate."""
+    if index is None:
+        return float("nan")
+
+    qpos = np.asarray(
+        jax.device_get(state.data.qpos)
+    ).reshape(-1)
+
+    if index < 0 or index >= qpos.size:
+        return float("nan")
+
+    return float(qpos[index])
+
+
+def _finite_mean(values) -> float:
+    values = np.asarray(values, dtype=np.float64)
+    values = values[np.isfinite(values)]
+
+    if values.size == 0:
+        return float("nan")
+
+    return float(values.mean())
+
+
+def _finite_std(values) -> float:
+    values = np.asarray(values, dtype=np.float64)
+    values = values[np.isfinite(values)]
+
+    if values.size == 0:
+        return float("nan")
+
+    return float(values.std())
+
+
+def _safe_correlation(
+    x,
+    y,
+) -> float:
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+
+    valid = np.isfinite(x) & np.isfinite(y)
+    x = x[valid]
+    y = y[valid]
+
+    if x.size < 2:
+        return float("nan")
+
+    if np.std(x) < 1e-12 or np.std(y) < 1e-12:
+        return float("nan")
+
+    return float(np.corrcoef(x, y)[0, 1])
+
+
+def _mean_pairwise_l2(
+    vectors: np.ndarray,
+) -> float:
+    """Mean pairwise Euclidean distance between rows."""
+    vectors = np.asarray(vectors, dtype=np.float64)
+
+    if vectors.ndim != 2 or vectors.shape[0] < 2:
+        return 0.0
+
+    distances = []
+
+    for first in range(vectors.shape[0]):
+        for second in range(first + 1, vectors.shape[0]):
+            distances.append(
+                np.linalg.norm(
+                    vectors[first] - vectors[second]
+                )
+            )
+
+    return float(np.mean(distances))
+
+
+def _json_serialisable(value):
+    if isinstance(value, dict):
+        return {
+            key: _json_serialisable(item)
+            for key, item in value.items()
+        }
+
+    if isinstance(value, (list, tuple)):
+        return [
+            _json_serialisable(item)
+            for item in value
+        ]
+
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+
+    if isinstance(value, (np.floating, np.integer)):
+        return value.item()
+
+    if isinstance(value, Path):
+        return str(value)
+
+    return value
+
+
+def _write_eval_csv(
+    path: Path,
+    rows: list[dict],
+    z_dim: int,
+) -> None:
+    """Writes rows while expanding z into z_0, z_1, ..."""
+    if not rows:
+        return
+
+    expanded_rows = []
+
+    for row in rows:
+        expanded = {
+            key: value
+            for key, value in row.items()
+            if key != "z"
+        }
+
+        z = np.asarray(row["z"]).reshape(-1)
+
+        for dimension in range(z_dim):
+            expanded[f"z_{dimension}"] = float(
+                z[dimension]
+            )
+
+        expanded_rows.append(expanded)
+
+    with path.open(
+        "w",
+        newline="",
+        encoding="utf-8",
+    ) as file:
+        writer = csv.DictWriter(
+            file,
+            fieldnames=list(expanded_rows[0].keys()),
+        )
+
+        writer.writeheader()
+        writer.writerows(expanded_rows)
+
+
+def evaluate_skill_diagnostics(
+    config,
+    actor_state: TrainState,
+    phi_state: TrainState | None = None,
+) -> dict:
+    """Evaluates whether z produces reliably different behaviour.
+
+    Every skill is evaluated from exactly the same collection of reset
+    seeds. This prevents initial-state variation from being mistaken for
+    skill-dependent behaviour.
+    """
+    env_name, eval_env = _make_raw_eval_env(config)
 
     actor = Actor(
         dim=config["LAYER_SIZE"],
@@ -1042,6 +1224,1022 @@ def record_eval_videos(
         log_std_min=config.get("LOG_STD_MIN", -5.0),
         log_std_max=config.get("LOG_STD_MAX", 2.0),
     )
+
+    encoder = None
+
+    if phi_state is not None:
+        encoder = Encoder(
+            config["Z_DIM"],
+            config["LAYER_SIZE"],
+        )
+
+    reset_fn = jax.jit(eval_env.reset)
+    step_fn = jax.jit(eval_env.step)
+
+    @jax.jit
+    def policy_stats(
+        actor_params,
+        obs: jax.Array,
+        z: jax.Array,
+    ) -> tuple[jax.Array, jax.Array]:
+        mean, log_std = actor.apply(
+            actor_params,
+            obs,
+            z,
+        )
+
+        deterministic_action = jnp.tanh(mean)
+        policy_std = jnp.exp(log_std)
+
+        return deterministic_action, policy_std
+
+    if encoder is not None:
+        @jax.jit
+        def encode(
+            phi_params,
+            obs: jax.Array,
+        ) -> jax.Array:
+            return encoder.apply(phi_params, obs)
+    else:
+        encode = None
+
+    eval_zs = _make_eval_latents(config)
+    eval_zs_host = np.asarray(
+        jax.device_get(eval_zs),
+        dtype=np.float64,
+    )
+
+    num_skills = int(eval_zs.shape[0])
+
+    num_rollouts = int(
+        config.get("NUM_EVAL_ROLLOUTS", 5)
+    )
+
+    episode_length = int(
+        config.get(
+            "EVAL_EPISODE_LENGTH",
+            config.get("EPISODE_LENGTH", 200),
+        )
+    )
+
+    action_repeat = int(
+        config.get("ACTION_REPEAT", 1)
+    )
+
+    direction_threshold = float(
+        config.get("EVAL_DIRECTION_THRESHOLD", 0.25)
+    )
+
+    root_x_index = config.get(
+        "ROOT_X_QPOS_INDEX",
+        0,
+    )
+    root_z_index = config.get(
+        "ROOT_Z_QPOS_INDEX",
+        1,
+    )
+    root_pitch_index = config.get(
+        "ROOT_PITCH_QPOS_INDEX",
+        2,
+    )
+
+    max_probe_states = int(
+        config.get("EVAL_ACTION_PROBE_STATES", 128)
+    )
+    probe_stride = max(
+        1,
+        int(config.get("EVAL_ACTION_PROBE_STRIDE", 10)),
+    )
+    probes_per_skill = max(
+        1,
+        max_probe_states // max(num_skills, 1),
+    )
+
+    base_key = jax.random.PRNGKey(
+        int(
+            config.get(
+                "EVAL_SEED",
+                config.get("SEED", 0),
+            )
+        )
+    )
+
+    rollout_rows: list[dict] = []
+    skill_rows: list[dict] = []
+    probe_observations: list[np.ndarray] = []
+
+    for skill_index in range(num_skills):
+        z = eval_zs[skill_index]
+        z_host = eval_zs_host[skill_index]
+
+        reward_vector = _eval_reward_vector(
+            z,
+            config,
+        )
+
+        this_skill_rollouts = []
+        collected_skill_probes = 0
+
+        for rollout_index in range(num_rollouts):
+            # Do not include skill_index here. All skills receive
+            # exactly the same reset keys.
+            reset_key = jax.random.fold_in(
+                base_key,
+                rollout_index,
+            )
+
+            state = reset_fn(reset_key)
+
+            initial_obs = get_metra_obs(state)
+
+            initial_x = _read_qpos(
+                state,
+                root_x_index,
+            )
+            initial_root_z = _read_qpos(
+                state,
+                root_z_index,
+            )
+            initial_pitch = _read_qpos(
+                state,
+                root_pitch_index,
+            )
+
+            if encode is not None:
+                initial_phi = encode(
+                    phi_state.params,
+                    initial_obs,
+                )
+                previous_phi = initial_phi
+            else:
+                initial_phi = None
+                previous_phi = None
+
+            environment_return = 0.0
+            cumulative_phi_reward = 0.0
+
+            action_abs_sum = 0.0
+            action_saturation_sum = 0.0
+            policy_std_sum = 0.0
+
+            policy_steps = 0
+            physics_steps = 0
+            terminated = False
+
+            for policy_step in range(episode_length):
+                obs = get_metra_obs(state)
+
+                if (
+                    rollout_index == 0
+                    and collected_skill_probes < probes_per_skill
+                    and policy_step % probe_stride == 0
+                ):
+                    probe_observations.append(
+                        np.asarray(
+                            jax.device_get(obs),
+                            dtype=np.float32,
+                        )
+                    )
+                    collected_skill_probes += 1
+
+                action, policy_std = policy_stats(
+                    actor_state.params,
+                    obs,
+                    z,
+                )
+
+                action_host = np.asarray(
+                    jax.device_get(action),
+                    dtype=np.float64,
+                )
+                std_host = np.asarray(
+                    jax.device_get(policy_std),
+                    dtype=np.float64,
+                )
+
+                action_abs_sum += float(
+                    np.mean(np.abs(action_host))
+                )
+                action_saturation_sum += float(
+                    np.mean(np.abs(action_host) > 0.95)
+                )
+                policy_std_sum += float(
+                    np.mean(std_host)
+                )
+                policy_steps += 1
+
+                for _ in range(action_repeat):
+                    state = step_fn(state, action)
+                    physics_steps += 1
+
+                    environment_return += float(
+                        jax.device_get(state.reward)
+                    )
+
+                    if bool(jax.device_get(state.done)):
+                        terminated = True
+                        break
+
+                if encode is not None:
+                    next_obs = get_metra_obs(state)
+
+                    next_phi = encode(
+                        phi_state.params,
+                        next_obs,
+                    )
+
+                    phi_diff = next_phi - previous_phi
+
+                    cumulative_phi_reward += float(
+                        jax.device_get(
+                            jnp.sum(
+                                phi_diff * reward_vector
+                            )
+                        )
+                    )
+
+                    previous_phi = next_phi
+
+                if terminated:
+                    break
+
+            final_obs = get_metra_obs(state)
+
+            final_x = _read_qpos(
+                state,
+                root_x_index,
+            )
+            final_root_z = _read_qpos(
+                state,
+                root_z_index,
+            )
+            final_pitch = _read_qpos(
+                state,
+                root_pitch_index,
+            )
+
+            delta_x = final_x - initial_x
+            delta_root_z = final_root_z - initial_root_z
+            delta_pitch = final_pitch - initial_pitch
+
+            elapsed_seconds = (
+                physics_steps * float(eval_env.dt)
+            )
+
+            mean_x_velocity = (
+                delta_x / elapsed_seconds
+                if elapsed_seconds > 0.0
+                and np.isfinite(delta_x)
+                else float("nan")
+            )
+
+            rollout_row = {
+                "skill_index": skill_index,
+                "rollout_index": rollout_index,
+                "z": z_host,
+                "initial_x": initial_x,
+                "final_x": final_x,
+                "delta_x": delta_x,
+                "initial_root_z": initial_root_z,
+                "final_root_z": final_root_z,
+                "delta_root_z": delta_root_z,
+                "initial_pitch": initial_pitch,
+                "final_pitch": final_pitch,
+                "delta_pitch": delta_pitch,
+                "mean_x_velocity": mean_x_velocity,
+                "env_return": environment_return,
+                "policy_steps": policy_steps,
+                "physics_steps": physics_steps,
+                "terminated": float(terminated),
+                "mean_action_abs": (
+                    action_abs_sum / max(policy_steps, 1)
+                ),
+                "action_saturation_frac": (
+                    action_saturation_sum
+                    / max(policy_steps, 1)
+                ),
+                "mean_policy_std": (
+                    policy_std_sum / max(policy_steps, 1)
+                ),
+            }
+
+            if encode is not None:
+                final_phi = encode(
+                    phi_state.params,
+                    final_obs,
+                )
+
+                endpoint_phi_delta = (
+                    final_phi - initial_phi
+                )
+
+                endpoint_phi_reward = float(
+                    jax.device_get(
+                        jnp.sum(
+                            endpoint_phi_delta
+                            * reward_vector
+                        )
+                    )
+                )
+
+                endpoint_phi_delta_norm = float(
+                    jax.device_get(
+                        jnp.linalg.norm(
+                            endpoint_phi_delta
+                        )
+                    )
+                )
+
+                reward_vector_norm = float(
+                    jax.device_get(
+                        jnp.linalg.norm(
+                            reward_vector
+                        )
+                    )
+                )
+
+                endpoint_phi_cosine = (
+                    endpoint_phi_reward
+                    / (
+                        endpoint_phi_delta_norm
+                        * reward_vector_norm
+                        + 1e-8
+                    )
+                )
+
+                rollout_row.update(
+                    {
+                        "endpoint_phi_reward":
+                            endpoint_phi_reward,
+                        "cumulative_phi_reward":
+                            cumulative_phi_reward,
+                        "phi_telescoping_abs_error":
+                            abs(
+                                endpoint_phi_reward
+                                - cumulative_phi_reward
+                            ),
+                        "endpoint_phi_delta_norm":
+                            endpoint_phi_delta_norm,
+                        "endpoint_phi_sq_dist":
+                            float(
+                                jax.device_get(
+                                    jnp.mean(
+                                        jnp.square(
+                                            endpoint_phi_delta
+                                        )
+                                    )
+                                )
+                            ),
+                        "endpoint_phi_z_cosine":
+                            endpoint_phi_cosine,
+                    }
+                )
+
+            rollout_rows.append(rollout_row)
+            this_skill_rollouts.append(rollout_row)
+
+        delta_x_values = np.asarray(
+            [
+                row["delta_x"]
+                for row in this_skill_rollouts
+            ],
+            dtype=np.float64,
+        )
+
+        forward_fraction = float(
+            np.mean(
+                delta_x_values > direction_threshold
+            )
+        )
+        backward_fraction = float(
+            np.mean(
+                delta_x_values < -direction_threshold
+            )
+        )
+        stationary_fraction = float(
+            np.mean(
+                np.abs(delta_x_values)
+                <= direction_threshold
+            )
+        )
+
+        direction_consistency = max(
+            forward_fraction,
+            backward_fraction,
+            stationary_fraction,
+        )
+
+        skill_row = {
+            "skill_index": skill_index,
+            "z": z_host,
+            "mean_final_x": _finite_mean(
+                [
+                    row["final_x"]
+                    for row in this_skill_rollouts
+                ]
+            ),
+            "std_final_x": _finite_std(
+                [
+                    row["final_x"]
+                    for row in this_skill_rollouts
+                ]
+            ),
+            "mean_delta_x": _finite_mean(
+                delta_x_values
+            ),
+            "std_delta_x": _finite_std(
+                delta_x_values
+            ),
+            "mean_abs_delta_x": _finite_mean(
+                np.abs(delta_x_values)
+            ),
+            "mean_x_velocity": _finite_mean(
+                [
+                    row["mean_x_velocity"]
+                    for row in this_skill_rollouts
+                ]
+            ),
+            "mean_final_root_z": _finite_mean(
+                [
+                    row["final_root_z"]
+                    for row in this_skill_rollouts
+                ]
+            ),
+            "std_final_root_z": _finite_std(
+                [
+                    row["final_root_z"]
+                    for row in this_skill_rollouts
+                ]
+            ),
+            "mean_final_pitch": _finite_mean(
+                [
+                    row["final_pitch"]
+                    for row in this_skill_rollouts
+                ]
+            ),
+            "std_final_pitch": _finite_std(
+                [
+                    row["final_pitch"]
+                    for row in this_skill_rollouts
+                ]
+            ),
+            "mean_env_return": _finite_mean(
+                [
+                    row["env_return"]
+                    for row in this_skill_rollouts
+                ]
+            ),
+            "std_env_return": _finite_std(
+                [
+                    row["env_return"]
+                    for row in this_skill_rollouts
+                ]
+            ),
+            "mean_policy_steps": _finite_mean(
+                [
+                    row["policy_steps"]
+                    for row in this_skill_rollouts
+                ]
+            ),
+            "termination_rate": _finite_mean(
+                [
+                    row["terminated"]
+                    for row in this_skill_rollouts
+                ]
+            ),
+            "forward_frac": forward_fraction,
+            "backward_frac": backward_fraction,
+            "stationary_frac": stationary_fraction,
+            "direction_consistency":
+                direction_consistency,
+            "mean_action_abs": _finite_mean(
+                [
+                    row["mean_action_abs"]
+                    for row in this_skill_rollouts
+                ]
+            ),
+            "action_saturation_frac": _finite_mean(
+                [
+                    row["action_saturation_frac"]
+                    for row in this_skill_rollouts
+                ]
+            ),
+            "mean_policy_std": _finite_mean(
+                [
+                    row["mean_policy_std"]
+                    for row in this_skill_rollouts
+                ]
+            ),
+        }
+
+        if encode is not None:
+            skill_row.update(
+                {
+                    "mean_endpoint_phi_reward":
+                        _finite_mean(
+                            [
+                                row["endpoint_phi_reward"]
+                                for row
+                                in this_skill_rollouts
+                            ]
+                        ),
+                    "std_endpoint_phi_reward":
+                        _finite_std(
+                            [
+                                row["endpoint_phi_reward"]
+                                for row
+                                in this_skill_rollouts
+                            ]
+                        ),
+                    "mean_endpoint_phi_z_cosine":
+                        _finite_mean(
+                            [
+                                row["endpoint_phi_z_cosine"]
+                                for row
+                                in this_skill_rollouts
+                            ]
+                        ),
+                    "mean_endpoint_phi_delta_norm":
+                        _finite_mean(
+                            [
+                                row["endpoint_phi_delta_norm"]
+                                for row
+                                in this_skill_rollouts
+                            ]
+                        ),
+                    "mean_endpoint_phi_sq_dist":
+                        _finite_mean(
+                            [
+                                row["endpoint_phi_sq_dist"]
+                                for row
+                                in this_skill_rollouts
+                            ]
+                        ),
+                    "mean_phi_telescoping_abs_error":
+                        _finite_mean(
+                            [
+                                row["phi_telescoping_abs_error"]
+                                for row
+                                in this_skill_rollouts
+                            ]
+                        ),
+                }
+            )
+
+        skill_rows.append(skill_row)
+
+        print(
+            f"Skill {skill_index:02d} "
+            f"z={np.array2string(z_host, precision=3)} | "
+            f"final_x={skill_row['mean_final_x']:+.3f} "
+            f"± {skill_row['std_final_x']:.3f} | "
+            f"dx={skill_row['mean_delta_x']:+.3f} "
+            f"± {skill_row['std_delta_x']:.3f} | "
+            f"vx={skill_row['mean_x_velocity']:+.3f} | "
+            f"return={skill_row['mean_env_return']:.2f} | "
+            f"term={skill_row['termination_rate']:.2f} | "
+            f"consistency="
+            f"{skill_row['direction_consistency']:.2f}"
+        )
+
+    mean_delta_x_values = np.asarray(
+        [
+            row["mean_delta_x"]
+            for row in skill_rows
+        ],
+        dtype=np.float64,
+    )
+
+    within_skill_std_values = np.asarray(
+        [
+            row["std_delta_x"]
+            for row in skill_rows
+        ],
+        dtype=np.float64,
+    )
+
+    between_skill_std = _finite_std(
+        mean_delta_x_values
+    )
+    mean_within_skill_std = _finite_mean(
+        within_skill_std_values
+    )
+
+    displacement_separation_ratio = (
+        between_skill_std
+        / (mean_within_skill_std + 1e-8)
+    )
+
+    pairwise_displacement_differences = []
+
+    for first in range(num_skills):
+        for second in range(first + 1, num_skills):
+            pairwise_displacement_differences.append(
+                abs(
+                    mean_delta_x_values[first]
+                    - mean_delta_x_values[second]
+                )
+            )
+
+    summary = {
+        "environment": env_name,
+        "num_skills": num_skills,
+        "num_rollouts_per_skill": num_rollouts,
+        "between_skill_delta_x_std":
+            between_skill_std,
+        "mean_within_skill_delta_x_std":
+            mean_within_skill_std,
+        "displacement_separation_ratio":
+            displacement_separation_ratio,
+        "mean_pairwise_delta_x_difference":
+            _finite_mean(
+                pairwise_displacement_differences
+            ),
+        "delta_x_range":
+            float(
+                np.nanmax(mean_delta_x_values)
+                - np.nanmin(mean_delta_x_values)
+            ),
+        "num_forward_skills":
+            int(
+                np.sum(
+                    mean_delta_x_values
+                    > direction_threshold
+                )
+            ),
+        "num_backward_skills":
+            int(
+                np.sum(
+                    mean_delta_x_values
+                    < -direction_threshold
+                )
+            ),
+        "num_stationary_skills":
+            int(
+                np.sum(
+                    np.abs(mean_delta_x_values)
+                    <= direction_threshold
+                )
+            ),
+        "mean_direction_consistency":
+            _finite_mean(
+                [
+                    row["direction_consistency"]
+                    for row in skill_rows
+                ]
+            ),
+        "mean_skill_env_return":
+            _finite_mean(
+                [
+                    row["mean_env_return"]
+                    for row in skill_rows
+                ]
+            ),
+        "mean_termination_rate":
+            _finite_mean(
+                [
+                    row["termination_rate"]
+                    for row in skill_rows
+                ]
+            ),
+    }
+
+    z_delta_x_correlations = [
+        _safe_correlation(
+            eval_zs_host[:, dimension],
+            mean_delta_x_values,
+        )
+        for dimension in range(
+            eval_zs_host.shape[1]
+        )
+    ]
+
+    summary["z_dim_delta_x_correlations"] = (
+        z_delta_x_correlations
+    )
+
+    finite_correlations = np.asarray(
+        [
+            value
+            for value in z_delta_x_correlations
+            if np.isfinite(value)
+        ],
+        dtype=np.float64,
+    )
+
+    summary["max_abs_z_delta_x_correlation"] = (
+        float(
+            np.max(
+                np.abs(finite_correlations)
+            )
+        )
+        if finite_correlations.size > 0
+        else float("nan")
+    )
+
+    # Linear regression from z to mean horizontal displacement.
+    if (
+        num_skills > eval_zs_host.shape[1] + 1
+        and np.std(mean_delta_x_values) > 1e-12
+    ):
+        design_matrix = np.concatenate(
+            [
+                eval_zs_host,
+                np.ones(
+                    (num_skills, 1),
+                    dtype=np.float64,
+                ),
+            ],
+            axis=1,
+        )
+
+        coefficients, *_ = np.linalg.lstsq(
+            design_matrix,
+            mean_delta_x_values,
+            rcond=None,
+        )
+
+        predicted_delta_x = (
+            design_matrix @ coefficients
+        )
+
+        residual_sum_squares = float(
+            np.sum(
+                np.square(
+                    mean_delta_x_values
+                    - predicted_delta_x
+                )
+            )
+        )
+
+        total_sum_squares = float(
+            np.sum(
+                np.square(
+                    mean_delta_x_values
+                    - mean_delta_x_values.mean()
+                )
+            )
+        )
+
+        summary["linear_z_to_delta_x_r2"] = (
+            1.0
+            - residual_sum_squares
+            / (total_sum_squares + 1e-12)
+        )
+    else:
+        summary["linear_z_to_delta_x_r2"] = (
+            float("nan")
+        )
+
+    # Counterfactual test:
+    # hold observation fixed and change only z.
+    if probe_observations:
+        probe_obs = jnp.asarray(
+            np.stack(probe_observations),
+            dtype=jnp.float32,
+        )
+
+        num_probe_states = int(
+            probe_obs.shape[0]
+        )
+
+        observation_grid = jnp.broadcast_to(
+            probe_obs[:, None, :],
+            (
+                num_probe_states,
+                num_skills,
+                probe_obs.shape[-1],
+            ),
+        )
+
+        skill_grid = jnp.broadcast_to(
+            eval_zs[None, :, :],
+            (
+                num_probe_states,
+                num_skills,
+                eval_zs.shape[-1],
+            ),
+        )
+
+        action_grid, _ = policy_stats(
+            actor_state.params,
+            observation_grid.reshape(
+                (-1, observation_grid.shape[-1])
+            ),
+            skill_grid.reshape(
+                (-1, skill_grid.shape[-1])
+            ),
+        )
+
+        action_grid = np.asarray(
+            jax.device_get(
+                action_grid.reshape(
+                    (
+                        num_probe_states,
+                        num_skills,
+                        eval_env.action_size,
+                    )
+                )
+            ),
+            dtype=np.float64,
+        )
+
+        summary["num_action_probe_states"] = (
+            num_probe_states
+        )
+
+        summary[
+            "counterfactual_action_std_across_skills"
+        ] = float(
+            action_grid.std(axis=1).mean()
+        )
+
+        summary[
+            "counterfactual_action_range_across_skills"
+        ] = float(
+            (
+                action_grid.max(axis=1)
+                - action_grid.min(axis=1)
+            ).mean()
+        )
+
+        summary[
+            "counterfactual_action_pairwise_l2"
+        ] = _finite_mean(
+            [
+                _mean_pairwise_l2(actions)
+                for actions in action_grid
+            ]
+        )
+    else:
+        summary["num_action_probe_states"] = 0
+        summary[
+            "counterfactual_action_std_across_skills"
+        ] = float("nan")
+        summary[
+            "counterfactual_action_range_across_skills"
+        ] = float("nan")
+        summary[
+            "counterfactual_action_pairwise_l2"
+        ] = float("nan")
+
+    if encode is not None:
+        summary.update(
+            {
+                "mean_endpoint_phi_reward":
+                    _finite_mean(
+                        [
+                            row["mean_endpoint_phi_reward"]
+                            for row in skill_rows
+                        ]
+                    ),
+                "mean_endpoint_phi_z_cosine":
+                    _finite_mean(
+                        [
+                            row["mean_endpoint_phi_z_cosine"]
+                            for row in skill_rows
+                        ]
+                    ),
+                "mean_endpoint_phi_delta_norm":
+                    _finite_mean(
+                        [
+                            row[
+                                "mean_endpoint_phi_delta_norm"
+                            ]
+                            for row in skill_rows
+                        ]
+                    ),
+                "mean_phi_telescoping_abs_error":
+                    _finite_mean(
+                        [
+                            row[
+                                "mean_phi_telescoping_abs_error"
+                            ]
+                            for row in skill_rows
+                        ]
+                    ),
+            }
+        )
+
+    output_dir = Path(
+        config.get(
+            "EVAL_DIAGNOSTICS_DIR",
+            config.get(
+                "EVAL_VIDEO_DIR",
+                "eval_videos",
+            ),
+        )
+    )
+
+    output_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    rollout_csv_path = (
+        output_dir / "eval_rollouts.csv"
+    )
+    skills_csv_path = (
+        output_dir / "eval_skills.csv"
+    )
+    summary_json_path = (
+        output_dir / "eval_summary.json"
+    )
+
+    _write_eval_csv(
+        rollout_csv_path,
+        rollout_rows,
+        int(config["Z_DIM"]),
+    )
+
+    _write_eval_csv(
+        skills_csv_path,
+        skill_rows,
+        int(config["Z_DIM"]),
+    )
+
+    with summary_json_path.open(
+        "w",
+        encoding="utf-8",
+    ) as file:
+        json.dump(
+            _json_serialisable(
+                {
+                    "summary": summary,
+                    "per_skill": skill_rows,
+                }
+            ),
+            file,
+            indent=2,
+        )
+
+    print(
+        "\nSkill-diversity summary"
+        f"\n  between-skill std(dx): "
+        f"{between_skill_std:.3f}"
+        f"\n  mean within-skill std(dx): "
+        f"{mean_within_skill_std:.3f}"
+        f"\n  displacement separation ratio: "
+        f"{displacement_separation_ratio:.3f}"
+        f"\n  mean pairwise displacement difference: "
+        f"{summary['mean_pairwise_delta_x_difference']:.3f}"
+        f"\n  counterfactual action std: "
+        f"{summary['counterfactual_action_std_across_skills']:.4f}"
+        f"\n  counterfactual pairwise action L2: "
+        f"{summary['counterfactual_action_pairwise_l2']:.4f}"
+        f"\n  linear z -> dx R^2: "
+        f"{summary['linear_z_to_delta_x_r2']:.3f}"
+        f"\n  files: "
+        f"{skills_csv_path}, "
+        f"{rollout_csv_path}, "
+        f"{summary_json_path}"
+    )
+
+    return {
+        "summary": summary,
+        "per_skill": skill_rows,
+        "rollouts": rollout_rows,
+        "paths": {
+            "skills_csv": skills_csv_path,
+            "rollouts_csv": rollout_csv_path,
+            "summary_json": summary_json_path,
+        },
+    }
+
+
+def record_eval_videos(
+    config,
+    actor_state: TrainState,
+    phi_state: TrainState | None = None,
+) -> list[Path]:
+    """Records one deterministic video per skill.
+
+    Multi-seed diagnostic evaluation runs first unless
+    RUN_EVAL_DIAGNOSTICS is False.
+    """
+    if config.get("RUN_EVAL_DIAGNOSTICS", True):
+        evaluate_skill_diagnostics(
+            config,
+            actor_state,
+            phi_state,
+        )
+
+    env_name, eval_env = _make_raw_eval_env(config)
+
+    actor = Actor(
+        dim=config["LAYER_SIZE"],
+        action_dim=eval_env.action_size,
+        log_std_min=config.get("LOG_STD_MIN", -5.0),
+        log_std_max=config.get("LOG_STD_MAX", 2.0),
+    )
+
+    encoder = None
+
+    if phi_state is not None:
+        encoder = Encoder(
+            config["Z_DIM"],
+            config["LAYER_SIZE"],
+        )
 
     reset_fn = jax.jit(eval_env.reset)
     step_fn = jax.jit(eval_env.step)
@@ -1058,31 +2256,89 @@ def record_eval_videos(
             z,
         )
 
-        # The mean is in pre-tanh space.
         return jnp.tanh(mean)
+
+    if encoder is not None:
+        @jax.jit
+        def encode(
+            phi_params,
+            obs: jax.Array,
+        ) -> jax.Array:
+            return encoder.apply(phi_params, obs)
+    else:
+        encode = None
 
     eval_zs = _make_eval_latents(config)
 
     episode_length = int(
-        config.get("EVAL_EPISODE_LENGTH", config.get("EPISODE_LENGTH", 200))
+        config.get(
+            "EVAL_EPISODE_LENGTH",
+            config.get("EPISODE_LENGTH", 200),
+        )
     )
-    action_repeat = int(config.get("ACTION_REPEAT", 1))
+
+    action_repeat = int(
+        config.get("ACTION_REPEAT", 1)
+    )
+
+    root_x_index = config.get(
+        "ROOT_X_QPOS_INDEX",
+        0,
+    )
 
     camera = config.get(
         "EVAL_CAMERA",
-        "side" if env_name in {"WalkerWalk", "WalkerRun", "WalkerStand"} else None,
+        (
+            "side"
+            if env_name in {
+                "WalkerWalk",
+                "WalkerRun",
+                "WalkerStand",
+            }
+            else None
+        ),
     )
 
-    width = int(config.get("EVAL_WIDTH", 640))
-    height = int(config.get("EVAL_HEIGHT", 480))
+    width = int(
+        config.get("EVAL_WIDTH", 640)
+    )
+    height = int(
+        config.get("EVAL_HEIGHT", 480)
+    )
 
     output_dir = Path(
-        config.get("EVAL_VIDEO_DIR", "eval_videos")
+        config.get(
+            "EVAL_VIDEO_DIR",
+            "eval_videos",
+        )
     )
-    output_dir.mkdir(parents=True, exist_ok=True)
+
+    output_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
     base_key = jax.random.PRNGKey(
-        int(config.get("EVAL_SEED", config.get("SEED", 0)))
+        int(
+            config.get(
+                "EVAL_SEED",
+                config.get("SEED", 0),
+            )
+        )
+    )
+
+    shared_reset = bool(
+        config.get(
+            "EVAL_VIDEO_SHARED_RESET",
+            True,
+        )
+    )
+
+    video_reset_index = int(
+        config.get(
+            "EVAL_VIDEO_RESET_INDEX",
+            0,
+        )
     )
 
     output_paths = []
@@ -1090,11 +2346,42 @@ def record_eval_videos(
     for skill_index in range(eval_zs.shape[0]):
         z = eval_zs[skill_index]
 
-        reset_key = jax.random.fold_in(base_key, skill_index)
+        reward_vector = _eval_reward_vector(
+            z,
+            config,
+        )
+
+        reset_index = (
+            video_reset_index
+            if shared_reset
+            else skill_index
+        )
+
+        reset_key = jax.random.fold_in(
+            base_key,
+            reset_index,
+        )
+
         state = reset_fn(reset_key)
 
         rollout = [state]
-        episode_return = 0.0
+        environment_return = 0.0
+
+        initial_x = _read_qpos(
+            state,
+            root_x_index,
+        )
+
+        initial_obs = get_metra_obs(state)
+
+        initial_phi = (
+            encode(
+                phi_state.params,
+                initial_obs,
+            )
+            if encode is not None
+            else None
+        )
 
         for _ in range(episode_length):
             obs = get_metra_obs(state)
@@ -1105,18 +2392,74 @@ def record_eval_videos(
                 z,
             )
 
-            # Match the action-repeat behaviour used by the training wrapper.
-            step_reward = 0.0
+            terminated = False
 
             for _ in range(action_repeat):
                 state = step_fn(state, action)
-                step_reward += float(jax.device_get(state.reward))
 
-            episode_return += step_reward
+                environment_return += float(
+                    jax.device_get(state.reward)
+                )
+
+                if bool(jax.device_get(state.done)):
+                    terminated = True
+                    break
+
             rollout.append(state)
 
-            if bool(jax.device_get(state.done)):
+            if terminated:
                 break
+
+        final_x = _read_qpos(
+            state,
+            root_x_index,
+        )
+        delta_x = final_x - initial_x
+
+        endpoint_phi_reward = float("nan")
+        endpoint_phi_cosine = float("nan")
+
+        if encode is not None:
+            final_obs = get_metra_obs(state)
+
+            final_phi = encode(
+                phi_state.params,
+                final_obs,
+            )
+
+            endpoint_phi_delta = (
+                final_phi - initial_phi
+            )
+
+            endpoint_phi_reward = float(
+                jax.device_get(
+                    jnp.sum(
+                        endpoint_phi_delta
+                        * reward_vector
+                    )
+                )
+            )
+
+            endpoint_phi_cosine = (
+                endpoint_phi_reward
+                / (
+                    float(
+                        jax.device_get(
+                            jnp.linalg.norm(
+                                endpoint_phi_delta
+                            )
+                        )
+                    )
+                    * float(
+                        jax.device_get(
+                            jnp.linalg.norm(
+                                reward_vector
+                            )
+                        )
+                    )
+                    + 1e-8
+                )
+            )
 
         render_kwargs = {
             "width": width,
@@ -1132,11 +2475,14 @@ def record_eval_videos(
         )
 
         video_path = output_dir / (
-            f"{env_name}_skill_{skill_index:02d}.mp4"
+            f"{env_name}_skill_"
+            f"{skill_index:02d}.mp4"
         )
 
-        # Each recorded frame corresponds to one policy action.
-        fps = 1.0 / (float(eval_env.dt) * action_repeat)
+        fps = 1.0 / (
+            float(eval_env.dt)
+            * action_repeat
+        )
 
         media.write_video(
             str(video_path),
@@ -1144,13 +2490,28 @@ def record_eval_videos(
             fps=fps,
         )
 
-        z_host = jax.device_get(z)
+        z_host = np.asarray(
+            jax.device_get(z)
+        )
+
+        phi_text = ""
+
+        if encode is not None:
+            phi_text = (
+                f", endpoint_phi_reward="
+                f"{endpoint_phi_reward:+.3f}, "
+                f"phi_z_cos="
+                f"{endpoint_phi_cosine:+.3f}"
+            )
 
         print(
-            f"Recorded skill {skill_index}: "
-            f"z={z_host}, "
-            f"return={episode_return:.2f}, "
-            f"steps={len(rollout) - 1}, "
+            f"Recorded skill {skill_index:02d}: "
+            f"z={np.array2string(z_host, precision=3)}, "
+            f"return={environment_return:.2f}, "
+            f"final_x={final_x:+.3f}, "
+            f"delta_x={delta_x:+.3f}, "
+            f"steps={len(rollout) - 1}"
+            f"{phi_text}, "
             f"path={video_path}"
         )
 
