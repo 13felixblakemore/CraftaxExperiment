@@ -32,8 +32,14 @@ class Transition(NamedTuple):
     b: jnp.ndarray
 
 
-# could have num_options actors and a separate 
-class OptionCritic(nn.Module):
+# could combine HiPPO duration mechanism with termination function
+# can compare different duration distributions e.g. fixed, random, learned
+# use stochastic manager instead of e greedy pi(w given s)
+
+# to do:
+# - add termination function / duration toggle
+
+class SharedOptionCritic(nn.Module):
     num_options: int
     action_dim: int
     dim: int
@@ -41,7 +47,6 @@ class OptionCritic(nn.Module):
     @nn.compact
     def __call__(self, s):
         # s is shape (num_envs, obs_shape)
-        # maybe dense instead of conv for symbolic
 
         s = nn.Dense(self.dim)(s)
         s = nn.relu(s)
@@ -54,6 +59,77 @@ class OptionCritic(nn.Module):
         actions = actions.reshape((s.shape[0], self.num_options, self.action_dim)) # actions shape: (n, action_dim)
 
         return q_w, b, actions
+
+
+class SingleOption(nn.Module):
+    action_dim: int
+    dim: int
+
+    @nn.compact
+    def __call__(self, obs):
+        features = nn.Dense(self.dim)(obs)
+        features = nn.relu(features)
+        features = nn.Dense(self.dim)(features)
+        features = nn.relu(features)
+
+        action_logits = nn.Dense(self.action_dim)(features)
+        q_option = nn.Dense(1)(features).squeeze(-1)
+        beta_logit = nn.Dense(
+            1,
+            bias_init=nn.initializers.constant(-2.0),
+        )(features).squeeze(-1)
+
+        return q_option, beta_logit, action_logits
+
+
+class SeparateOptionCritic(nn.Module):
+    num_options: int
+    action_dim: int
+    dim: int
+
+    @nn.compact
+    def __call__(self, obs):
+        q_values = []
+        beta_logits = []
+        action_logits = []
+
+        for option in range(self.num_options):
+            q, beta, logits = SingleOption(
+                action_dim=self.action_dim,
+                dim=self.dim,
+                name=f"option_{option}",
+            )(obs)
+
+            q_values.append(q)
+            beta_logits.append(beta)
+            action_logits.append(logits)
+
+        return (
+            jnp.stack(q_values, axis=-1),
+            jnp.stack(beta_logits, axis=-1),
+            jnp.stack(action_logits, axis=1),
+        )
+
+
+def make_option_critic_network(config, action_dim):
+    """Construct the configured Option-Critic architecture.
+
+    Both implementations expose the same outputs:
+        q_w:          (batch_size, num_options)
+        beta_logits:  (batch_size, num_options)
+        action_logits:(batch_size, num_options, action_dim)
+    """
+    network_cls = (
+        SharedOptionCritic
+        if config["SHARED_NETWORK"]
+        else SeparateOptionCritic
+    )
+
+    return network_cls(
+        num_options=config["NUM_OPTIONS"],
+        action_dim=action_dim,
+        dim=config["LAYER_SIZE"],
+    )
 
 
 def make_train(config):
@@ -82,7 +158,10 @@ def make_train(config):
         return config["LR"] * frac
 
     def train(rng):
-        network = OptionCritic(config["NUM_OPTIONS"], env.action_space(env_params).n, config["LAYER_SIZE"])
+        network = make_option_critic_network(
+            config=config,
+            action_dim=env.action_space(env_params).n,
+        )
         rng, _rng = jax.random.split(rng)
         init_x = jnp.zeros((1, *env.observation_space(env_params).shape))
         network_params = network.init(_rng, init_x)
@@ -97,6 +176,7 @@ def make_train(config):
                 optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
                 optax.adam(config["LR"], eps=1e-5),
             )
+
         train_state = TrainState.create(
             apply_fn=network.apply,
             params=network_params,
@@ -109,7 +189,7 @@ def make_train(config):
         # choose w according to Q_w(obs)
         q_w, b, action_logits = network.apply(train_state.params, obs)
 
-        # change this
+        # change this (?)
         def epsilon_greedy_options(rng, q_w, epsilon):
             batch_size = q_w.shape[0]
 
@@ -132,7 +212,7 @@ def make_train(config):
 
         def update_step(run_state, _):
             def rollout_step(carry, transition):
-                train_state, obs, env_states, rng, option = carry
+                train_state, obs, env_states, rng, option, remaining = carry
 
                 # choose action for each env
                 # calc log_probs of each action
@@ -164,7 +244,9 @@ def make_train(config):
                 new_option = jnp.where((terminate == 1), new_option, option)
 
                 transition = Transition(dones, actions, values, rewards, log_probs, obs, next_obs, infos, option, b)
-                new_carry = train_state, next_obs, next_env_states, rng, new_option
+
+                new_remaining = remaining
+                new_carry = train_state, next_obs, next_env_states, rng, new_option, new_remaining
                 return new_carry, transition
 
 

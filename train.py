@@ -113,7 +113,7 @@ def run(config):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--env_name", type=str, default="WalkerWalk")
+    parser.add_argument("--env_name", type=str, default="Craftax-Symbolic-v1")
     parser.add_argument("--algorithm", type=str, default="PPO")
     parser.add_argument(
         "--num_envs",
@@ -156,6 +156,7 @@ if __name__ == "__main__":
     parser.add_argument("--ent_temp", type=float, default=0.01)
 
     # Option Critic
+    parser.add_argument("--shared_network", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--num_options", type=int, default=4)
     parser.add_argument("--option_policy_eps", type=float, default=0.1)
     parser.add_argument("--delib_cost", type=float, default=0.05)
