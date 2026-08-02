@@ -505,6 +505,15 @@ def make_train(config):
 
                         entropy = policy.entropy().mean()
 
+                        # PPO diagnostics. These are computed before the
+                        # gradient update and averaged over all minibatches and
+                        # update epochs below.
+                        approx_kl = jnp.mean((ratio - 1.0) - log_ratio)
+                        clipfrac = jnp.mean(
+                            (jnp.abs(ratio - 1.0) > config["CLIP_EPS"])
+                            .astype(jnp.float32)
+                        )
+
                         B = rollout.obs.shape[0]
                         batch_idx = jnp.arange(B)
                         options = rollout.option.astype(jnp.int32)
@@ -543,10 +552,13 @@ def make_train(config):
                         total_loss = actor_loss + config["VF_COEF"] * critic_loss - config["ENT_COEF"] * entropy + termination_loss
 
                         aux = {
+                            "loss": total_loss,
                             "actor_loss": actor_loss,
                             "critic_loss": critic_loss,
                             "entropy": entropy,
                             "termination_loss": termination_loss,
+                            "approx_kl": approx_kl,
+                            "clipfrac": clipfrac,
                         }
 
                         return total_loss, aux
@@ -556,7 +568,7 @@ def make_train(config):
                         train_state.params, rollout, advantages, returns
                     )
                     train_state = train_state.apply_gradients(grads=grads)
-                    return train_state, total_loss
+                    return train_state, losses
 
                 train_state, rollout, advantages, returns, rng = update_state
                 rng, _rng = jax.random.split(rng)
@@ -587,15 +599,15 @@ def make_train(config):
                     shuffled_batch,
                 )
 
-                train_state, total_loss = jax.lax.scan(
+                train_state, minibatch_metrics = jax.lax.scan(
                     update_minibatch, train_state, minibatches
                 )
                 update_state = (train_state, rollout, advantages, returns, rng)
-                return update_state, total_loss
+                return update_state, minibatch_metrics
 
             update_state = train_state, rollout, advantages, returns, rng
 
-            update_state, total_loss = jax.lax.scan(
+            update_state, training_metrics = jax.lax.scan(
                 update_epoch,
                 update_state,
                 None,
@@ -603,23 +615,124 @@ def make_train(config):
             )
 
             train_state = update_state[0]
-            metric = jax.tree.map(
-                lambda x: (x * rollout.info["returned_episode"]).sum()
-                          / rollout.info["returned_episode"].sum(),
+            rng = update_state[-1]
+
+            # `training_metrics` has leading dimensions
+            # (UPDATE_EPOCHS, NUM_MINIBATCHES). Reduce both so every W&B
+            # point describes the complete PPO update.
+            training_metrics = jax.tree_util.tree_map(
+                lambda x: jnp.mean(x),
+                training_metrics,
+            )
+
+            # Aggregate only transitions on which LogWrapper reports a
+            # completed episode. Expand the mask for vector-valued info such
+            # as Craftax achievement arrays. The protected denominator avoids
+            # NaNs when no episode finishes during this rollout.
+            episode_mask = rollout.info["returned_episode"].astype(jnp.float32)
+            num_completed_episodes = episode_mask.sum()
+            safe_episode_count = jnp.maximum(num_completed_episodes, 1.0)
+
+            def masked_episode_mean(x):
+                x = x.astype(jnp.float32)
+                extra_dims = x.ndim - episode_mask.ndim
+                expanded_mask = episode_mask.reshape(
+                    episode_mask.shape + (1,) * extra_dims
+                )
+                return (x * expanded_mask).sum(axis=(0, 1)) / safe_episode_count
+
+            episode_metrics = jax.tree_util.tree_map(
+                masked_episode_mean,
                 rollout.info,
             )
 
-            rng = update_state[-1]
+            # Option diagnostics are useful for detecting collapsed or
+            # effectively unused options.
+            option_usage = jax.nn.one_hot(
+                rollout.option.astype(jnp.int32),
+                config["NUM_OPTIONS"],
+            ).mean(axis=(0, 1))
+            selected_beta = jax.nn.sigmoid(rollout.b)
+            selected_beta = jnp.take_along_axis(
+                selected_beta,
+                rollout.option[..., None].astype(jnp.int32),
+                axis=-1,
+            ).squeeze(-1)
+            option_metrics = {
+                "option_boundary_rate": rollout.option_boundary.astype(
+                    jnp.float32
+                ).mean(),
+                "mean_selected_beta": selected_beta.mean(),
+                "mean_remaining": rollout.remaining.astype(jnp.float32).mean(),
+                "option_usage": option_usage,
+            }
+
+            # W&B's x-axis should count environment interactions, not PPO
+            # updates or gradient steps. `update_idx` is zero-based.
+            global_step = (
+                (update_idx + 1)
+                * config["NUM_ENVS"]
+                * config["NUM_STEPS"]
+            )
 
             if config["DEBUG"] and config["USE_WANDB"]:
-                def callback(metric, update_step):
-                    to_log = create_log_dict(metric, config)
-                    batch_log(update_step, to_log, config)
+                def callback(
+                    episode_metrics,
+                    training_metrics,
+                    option_metrics,
+                    num_completed_episodes,
+                    global_step,
+                ):
+                    # Do not log fake zero episode statistics on updates with
+                    # no completed episodes. Training diagnostics are still
+                    # logged every update.
+                    if float(num_completed_episodes) > 0.0:
+                        to_log = create_log_dict(episode_metrics, config)
+                    else:
+                        to_log = {}
+
+                    to_log.update({
+                        "loss": float(training_metrics["loss"]),
+                        "actor_loss": float(training_metrics["actor_loss"]),
+                        "critic_loss": float(training_metrics["critic_loss"]),
+                        "entropy": float(training_metrics["entropy"]),
+                        "termination_loss": float(
+                            training_metrics["termination_loss"]
+                        ),
+                        "approx_kl": float(training_metrics["approx_kl"]),
+                        "clipfrac": float(training_metrics["clipfrac"]),
+                        "option_boundary_rate": float(
+                            option_metrics["option_boundary_rate"]
+                        ),
+                        "completed_episodes": float(num_completed_episodes),
+                        "global_step": int(global_step),
+                    })
+
+                    if duration_mode == "learned":
+                        to_log["mean_selected_beta"] = float(
+                            option_metrics["mean_selected_beta"]
+                        )
+                    else:
+                        to_log["mean_remaining"] = float(
+                            option_metrics["mean_remaining"]
+                        )
+
+                    for option_idx, usage in enumerate(
+                        option_metrics["option_usage"]
+                    ):
+                        to_log[f"option_{option_idx}_usage"] = float(usage)
+
+                    # `global_step` is already expressed in environment steps;
+                    # batch_log must not multiply it again.
+                    batch_log(int(global_step), to_log, config)
 
                 jax.debug.callback(
                     callback,
-                    metric,
-                    update_idx,
+                    episode_metrics,
+                    training_metrics,
+                    option_metrics,
+                    num_completed_episodes,
+                    global_step,
                 )
 
             runner_state = (
@@ -632,7 +745,14 @@ def make_train(config):
                 update_idx + 1,
             )
 
-            return runner_state, metric
+            logged_metrics = {
+                "episode": episode_metrics,
+                "training": training_metrics,
+                "options": option_metrics,
+                "completed_episodes": num_completed_episodes,
+                "global_step": global_step,
+            }
+            return runner_state, logged_metrics
 
         rng, _rng = jax.random.split(rng)
         run_state = (
@@ -645,12 +765,15 @@ def make_train(config):
             jnp.array(0),
         )
 
-        run_state, metric = jax.lax.scan(
+        run_state, metrics = jax.lax.scan(
             update_step,
             run_state,
             None,
             length=config["NUM_UPDATES"],
         )
 
-        return {"runner_state": run_state}
+        return {
+            "runner_state": run_state,
+            "metrics": metrics,
+        }
     return train
