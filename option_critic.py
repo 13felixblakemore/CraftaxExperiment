@@ -30,6 +30,8 @@ class Transition(NamedTuple):
     info: jnp.ndarray
     option: jnp.ndarray
     b: jnp.ndarray
+    option_boundary: jnp.ndarray
+    remaining: jnp.ndarray
 
 
 # could combine HiPPO duration mechanism with termination function
@@ -133,6 +135,29 @@ def make_option_critic_network(config, action_dim):
 
 
 def make_train(config):
+    # Temporal abstraction mode:
+    #   learned: sample termination from beta_o(s)
+    #   fixed:   execute every option for FIXED_OPTION_LENGTH steps
+    #   uniform: sample each option length uniformly from
+    #            [MIN_OPTION_LENGTH, MAX_OPTION_LENGTH]
+
+    duration_mode = config["OPTION_DURATION_MODE"].lower()
+    valid_duration_modes = {"learned", "fixed", "uniform"}
+    if duration_mode not in valid_duration_modes:
+        raise ValueError(
+            "OPTION_DURATION_MODE must be one of "
+            f"{sorted(valid_duration_modes)}, got {duration_mode!r}"
+        )
+    if config["FIXED_OPTION_LENGTH"] < 1:
+        raise ValueError("FIXED_OPTION_LENGTH must be at least 1")
+    if config["MIN_OPTION_LENGTH"] < 1:
+        raise ValueError("MIN_OPTION_LENGTH must be at least 1")
+    if config["MAX_OPTION_LENGTH"] < config["MIN_OPTION_LENGTH"]:
+        raise ValueError(
+            "MAX_OPTION_LENGTH must be greater than or equal to "
+            "MIN_OPTION_LENGTH"
+        )
+
     env = make_craftax_env_from_name(config["ENV_NAME"], not config["USE_OPTIMISTIC_RESETS"])
     env_params = env.default_params
     env = LogWrapper(env)
@@ -207,52 +232,143 @@ def make_train(config):
 
             return jnp.where(choose_random, random_option, greedy_option)
 
+        def sample_option_duration(rng, batch_size):
+            """Sample a new commitment length for each environment."""
+            if duration_mode == "fixed":
+                return jnp.full(
+                    (batch_size,),
+                    config["FIXED_OPTION_LENGTH"],
+                    dtype=jnp.int32,
+                )
+            if duration_mode == "uniform":
+                return jax.random.randint(
+                    rng,
+                    shape=(batch_size,),
+                    minval=config["MIN_OPTION_LENGTH"],
+                    maxval=config["MAX_OPTION_LENGTH"] + 1,
+                    dtype=jnp.int32,
+                )
+            # The learned-beta mode does not use the timer. Keeping a
+            # placeholder gives every mode the same scan carry structure.
+            return jnp.zeros((batch_size,), dtype=jnp.int32)
+
         rng, _rng = jax.random.split(rng)
         option = epsilon_greedy_options(_rng, q_w, config["OPTION_POLICY_EPS"])
 
+        rng, _rng = jax.random.split(rng)
+        remaining = sample_option_duration(_rng, config["NUM_ENVS"])
+
         def update_step(run_state, _):
-            def rollout_step(carry, transition):
+            def rollout_step(carry, _):
                 train_state, obs, env_states, rng, option, remaining = carry
 
-                # choose action for each env
-                # calc log_probs of each action
-                rng, _rng = jax.random.split(rng)
-                values, b, action_logits = network.apply(train_state.params, obs)
-                logits_o = action_logits[jnp.arange(config["NUM_ENVS"]), option, :]
+                # Execute the intra-option policy for the active option.
+                rng, action_key = jax.random.split(rng)
+                values, beta_logits, action_logits = network.apply(
+                    train_state.params, obs
+                )
+                env_idx = jnp.arange(config["NUM_ENVS"])
+                logits_o = action_logits[env_idx, option, :]
                 policy = distrax.Categorical(logits=logits_o)
-                actions = policy.sample(seed=_rng)
+                actions = policy.sample(seed=action_key)
                 log_probs = policy.log_prob(actions)
 
-                rng, _rng = jax.random.split(rng)
+                rng, env_key = jax.random.split(rng)
                 next_obs, next_env_states, rewards, dones, infos = env.step(
-                    _rng,
+                    env_key,
                     env_states,
                     actions,
                     env_params,
                 )
 
-                q_w, b_next, _ = network.apply(train_state.params, next_obs)
-                b_next = nn.sigmoid(b_next)
+                q_w_next, beta_next_logits, _ = network.apply(
+                    train_state.params, next_obs
+                )
 
-                b_next_o = b_next[jnp.arange(config["NUM_ENVS"]), option]
+                if duration_mode == "learned":
+                    beta_next = nn.sigmoid(beta_next_logits)
+                    beta_next_o = beta_next[env_idx, option]
+                    rng, termination_key = jax.random.split(rng)
+                    option_boundary = dones | jax.random.bernoulli(
+                        termination_key, beta_next_o
+                    )
+                    remaining_after = remaining
+                else:
+                    # `remaining` includes the action just taken. A value of
+                    # one therefore reaches an option boundary after this step.
+                    remaining_after = remaining - 1
+                    option_boundary = dones | (remaining_after <= 0)
 
-                rng, _rng = jax.random.split(rng)
-                terminate = dones | jax.random.bernoulli(_rng, b_next_o)
+                # The original Option-Critic outer policy is epsilon-greedy
+                # over Q_Omega and is consulted only at an option boundary.
+                rng, option_key = jax.random.split(rng)
+                candidate_option = epsilon_greedy_options(
+                    option_key,
+                    q_w_next,
+                    config["OPTION_POLICY_EPS"],
+                )
+                next_option = jnp.where(
+                    option_boundary,
+                    candidate_option,
+                    option,
+                )
 
-                rng, _rng = jax.random.split(rng)
-                new_option = epsilon_greedy_options(_rng, q_w, config["OPTION_POLICY_EPS"])
-                new_option = jnp.where((terminate == 1), new_option, option)
+                if duration_mode == "learned":
+                    next_remaining = remaining
+                else:
+                    rng, duration_key = jax.random.split(rng)
+                    sampled_duration = sample_option_duration(
+                        duration_key, config["NUM_ENVS"]
+                    )
+                    next_remaining = jnp.where(
+                        option_boundary,
+                        sampled_duration,
+                        remaining_after,
+                    )
 
-                transition = Transition(dones, actions, values, rewards, log_probs, obs, next_obs, infos, option, b)
+                transition = Transition(
+                    done=dones,
+                    action=actions,
+                    value=values,
+                    reward=rewards,
+                    log_prob=log_probs,
+                    obs=obs,
+                    next_obs=next_obs,
+                    info=infos,
+                    option=option,
+                    b=beta_logits,
+                    option_boundary=option_boundary,
+                    remaining=remaining,
+                )
 
-                new_remaining = remaining
-                new_carry = train_state, next_obs, next_env_states, rng, new_option, new_remaining
+                new_carry = (
+                    train_state,
+                    next_obs,
+                    next_env_states,
+                    rng,
+                    next_option,
+                    next_remaining,
+                )
                 return new_carry, transition
 
+            (
+                train_state,
+                obs,
+                env_states,
+                rng,
+                option,
+                remaining,
+                update_idx,
+            ) = run_state
 
-            train_state, obs, env_states, rng, option, update_idx = run_state
-
-            rollout_state = (train_state, obs, env_states, rng, option)
+            rollout_state = (
+                train_state,
+                obs,
+                env_states,
+                rng,
+                option,
+                remaining,
+            )
 
             rollout_state, rollout = jax.lax.scan(
                 rollout_step,
@@ -261,40 +377,87 @@ def make_train(config):
                 length=config["NUM_STEPS"],
             )
 
-            train_state, obs, env_states, rng, option = rollout_state
+            (
+                train_state,
+                obs,
+                env_states,
+                rng,
+                option,
+                remaining,
+            ) = rollout_state
 
             def compute_gae(rollout, last_q, last_b, option):
                 def gae_step(carry, transition):
-                    last_gae, next_value, next_b = carry
-                    reward, value, done, option, rollout_b_logits = transition
-                    next_b = nn.sigmoid(next_b)
+                    last_gae, next_value, next_b_logits = carry
+                    (
+                        reward,
+                        value,
+                        done,
+                        current_option,
+                        rollout_b_logits,
+                        option_boundary,
+                    ) = transition
 
+                    env_idx = jnp.arange(config["NUM_ENVS"])
                     next_non_terminal = 1.0 - done.astype(jnp.float32)
 
-                    bootstrap = ((1 - next_b[jnp.arange(config["NUM_ENVS"]), option]) * next_value[jnp.arange(config["NUM_ENVS"]), option] + next_b[jnp.arange(config["NUM_ENVS"]), option] * jnp.max(next_value, axis=-1))
+                    q_continue = next_value[env_idx, current_option]
+                    q_switch = jnp.max(next_value, axis=-1)
 
-                    delta = reward + config["GAMMA"] * bootstrap * next_non_terminal - value[jnp.arange(config["NUM_ENVS"]), option]
+                    if duration_mode == "learned":
+                        # Standard expected Option-Critic continuation target.
+                        next_beta = nn.sigmoid(next_b_logits)
+                        beta_next_o = next_beta[env_idx, current_option]
+                        bootstrap = (
+                            (1.0 - beta_next_o) * q_continue
+                            + beta_next_o * q_switch
+                        )
+                    else:
+                        # Forced-duration modes switch only when the timer ends.
+                        bootstrap = jnp.where(
+                            option_boundary,
+                            q_switch,
+                            q_continue,
+                        )
 
-                    last_gae = (
-                            delta
-                            + config["GAMMA"]
-                            * config["GAE_LAMBDA"]
-                            * next_non_terminal
-                            * last_gae
+                    selected_value = value[env_idx, current_option]
+                    delta = (
+                        reward
+                        + config["GAMMA"] * bootstrap * next_non_terminal
+                        - selected_value
                     )
 
-                    return (last_gae, value, rollout_b_logits), last_gae
+                    last_gae = (
+                        delta
+                        + config["GAMMA"]
+                        * config["GAE_LAMBDA"]
+                        * next_non_terminal
+                        * last_gae
+                    )
+
+                    return (
+                        last_gae,
+                        value,
+                        rollout_b_logits,
+                    ), last_gae
 
                 initial_carry = (
                     jnp.zeros_like(option, dtype=jnp.float32),
                     last_q,
-                    last_b
+                    last_b,
                 )
 
                 _, advantages = jax.lax.scan(
                     gae_step,
                     initial_carry,
-                    (rollout.reward, rollout.value, rollout.done, rollout.option, rollout.b),
+                    (
+                        rollout.reward,
+                        rollout.value,
+                        rollout.done,
+                        rollout.option,
+                        rollout.b,
+                        rollout.option_boundary,
+                    ),
                     reverse=True,
                     unroll=16,
                 )
@@ -302,14 +465,13 @@ def make_train(config):
                 values = rollout.value[
                     jnp.arange(config["NUM_STEPS"])[:, None],
                     jnp.arange(config["NUM_ENVS"])[None, :],
-                    rollout.option.astype(jnp.int32)
+                    rollout.option.astype(jnp.int32),
                 ]
 
                 returns = advantages + values
-
                 return advantages, returns
 
-            q_w_next, b_next, action_logits_next = network.apply(train_state.params, obs)
+            q_w_next, b_next, _ = network.apply(train_state.params, obs)
 
             advantages, returns = compute_gae(rollout, q_w_next, b_next, option)
 
@@ -350,23 +512,33 @@ def make_train(config):
                         values = q_w[batch_idx, options]
                         critic_loss = jnp.mean((values - returns) ** 2)
 
-                        b_next = nn.sigmoid(b_next_logits)
-                        beta_next_o = b_next[batch_idx, options]
-                        q_next_o = q_w_next[batch_idx, options]
+                        if duration_mode == "learned":
+                            b_next = nn.sigmoid(b_next_logits)
+                            beta_next_o = b_next[batch_idx, options]
+                            q_next_o = q_w_next[batch_idx, options]
 
-                        # Greedy baseline version
-                        v_next = jnp.max(q_w_next, axis=-1)
+                            # Greedy outer-policy baseline from original OC.
+                            v_next = jnp.max(q_w_next, axis=-1)
+                            termination_advantage = q_next_o - v_next
+                            termination_advantage = jax.lax.stop_gradient(
+                                termination_advantage + config["DELIB_COST"]
+                            )
 
-                        termination_advantage = q_next_o - v_next
-                        termination_advantage = jax.lax.stop_gradient(
-                            termination_advantage + config["DELIB_COST"]
-                        )
-
-                        nonterminal = 1.0 - rollout.done.astype(jnp.float32)
-
-                        termination_loss = jnp.mean(
-                            nonterminal * beta_next_o * termination_advantage
-                        )
+                            nonterminal = (
+                                1.0
+                                - rollout.done.astype(jnp.float32)
+                            )
+                            termination_loss = jnp.mean(
+                                nonterminal
+                                * beta_next_o
+                                * termination_advantage
+                            )
+                        else:
+                            # Beta heads remain in the model for a controlled
+                            # architecture comparison, but receive no loss.
+                            termination_loss = jnp.zeros(
+                                (), dtype=actor_loss.dtype
+                            )
 
                         total_loss = actor_loss + config["VF_COEF"] * critic_loss - config["ENT_COEF"] * entropy + termination_loss
 
@@ -456,13 +628,22 @@ def make_train(config):
                 env_states,
                 rng,
                 option,
+                remaining,
                 update_idx + 1,
             )
 
             return runner_state, metric
 
         rng, _rng = jax.random.split(rng)
-        run_state = (train_state, obs, env_states, _rng, option, jnp.array(0))
+        run_state = (
+            train_state,
+            obs,
+            env_states,
+            _rng,
+            option,
+            remaining,
+            jnp.array(0),
+        )
 
         run_state, metric = jax.lax.scan(
             update_step,

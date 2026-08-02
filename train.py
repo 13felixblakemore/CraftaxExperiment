@@ -118,14 +118,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--num_envs",
         type=int,
-        default=128,
+        default=1024,
     )
     parser.add_argument(
-        "--total_timesteps", type=lambda x: int(float(x)), default=1e6
+        "--total_timesteps", type=lambda x: int(float(x)), default=1e9
     )
-    parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--num_steps", type=int, default=200)
-    parser.add_argument("--update_epochs", type=int, default=50)
+    parser.add_argument("--lr", type=float, default=2e-4)
+    parser.add_argument("--num_steps", type=int, default=64)
+    parser.add_argument("--update_epochs", type=int, default=4)
     parser.add_argument("--num_minibatches", type=int, default=8)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--gae_lambda", type=float, default=0.8)
@@ -160,6 +160,10 @@ if __name__ == "__main__":
     parser.add_argument("--num_options", type=int, default=4)
     parser.add_argument("--option_policy_eps", type=float, default=0.1)
     parser.add_argument("--delib_cost", type=float, default=0.05)
+    parser.add_argument("--option_duration_mode", type=str, default="uniform")
+    parser.add_argument("--fixed_option_length", type=int, default=8)
+    parser.add_argument("--min_option_length", type=int, default=4)
+    parser.add_argument("--max_option_length", type=int, default=16)
     # MOC
     parser.add_argument("--eta", type=float, default=0.9)
     # HAC
