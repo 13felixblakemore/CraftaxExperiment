@@ -160,7 +160,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_options", type=int, default=4)
     parser.add_argument("--option_policy_eps", type=float, default=0.1)
     parser.add_argument("--delib_cost", type=float, default=0.05)
-    parser.add_argument("--option_duration_mode", type=str, default="uniform")
+    parser.add_argument("--option_duration_mode", type=str, default="fixed")
     parser.add_argument("--fixed_option_length", type=int, default=8)
     parser.add_argument("--min_option_length", type=int, default=4)
     parser.add_argument("--max_option_length", type=int, default=16)
